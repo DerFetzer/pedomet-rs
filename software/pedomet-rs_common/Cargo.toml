@@ -1,0 +1,14 @@
+[package]
+name = "pedomet-rs_common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0.210", default-features = false, features = ["derive"] }
+defmt = { version = "0.3.8", optional = true }
+postcard = { version = "1.0.10", features = ["experimental-derive"] }
+heapless = "0.7.17"
+
+[features]
+std = []
+
