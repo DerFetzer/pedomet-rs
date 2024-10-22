@@ -8,10 +8,10 @@ mod storage_event_queue;
 
 use defmt::{info, unwrap, warn};
 use embassy_sync::{
-    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
+    blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, Receiver, Sender, TrySendError},
 };
-use heapless::Vec;
+use embassy_time::Instant;
 #[cfg(not(feature = "defmt"))]
 use panic_halt as _;
 use static_cell::StaticCell;
@@ -31,7 +31,7 @@ use nrf_softdevice::{
     Flash,
 };
 use nrf_softdevice::{raw, Softdevice};
-use pedomet_rs_common::{PedometerEvent, PedometerEventType};
+use pedomet_rs_common::PedometerEventType;
 use storage_event_queue::{BreakIteration, HandleEntry, PopEntry, StorageEventQueue};
 
 #[embassy_executor::task]
@@ -46,8 +46,6 @@ struct BatteryService {
 }
 
 const EVENT_RESPONSE_SIZE: usize = 250;
-const MAX_EVENTS_IN_RESPONSE: usize =
-    EVENT_RESPONSE_SIZE / PedometerEvent::get_max_serialized_transport_size();
 
 #[nrf_softdevice::gatt_service(uuid = "1c2a0000-abf2-4b98-ba1c-25d5ea728525")]
 struct PedometerService {
@@ -57,6 +55,8 @@ struct PedometerService {
     response_events: [u8; EVENT_RESPONSE_SIZE],
     #[characteristic(uuid = "1c2a0003-abf2-4b98-ba1c-25d5ea728525", write)]
     delete_events: u32,
+    #[characteristic(uuid = "1c2a0004-abf2-4b98-ba1c-25d5ea728525", notify, write)]
+    epoch_ms: u64,
 }
 
 #[nrf_softdevice::gatt_server]
@@ -75,17 +75,18 @@ enum FlashCommand {
 
 static FLASH_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, FlashCommand, 4>> =
     StaticCell::new();
-static READ_EVENT_CHANNEL: StaticCell<Channel<NoopRawMutex, [u8; EVENT_RESPONSE_SIZE], 2>> =
-    StaticCell::new();
+static READ_EVENT_CHANNEL: StaticCell<
+    Channel<CriticalSectionRawMutex, [u8; EVENT_RESPONSE_SIZE], 2>,
+> = StaticCell::new();
 
 #[embassy_executor::task]
 async fn flash_task(
     sd: &'static Softdevice,
     command_receiver: Receiver<'static, CriticalSectionRawMutex, FlashCommand, 4>,
-    event_sender: Sender<'static, NoopRawMutex, [u8; EVENT_RESPONSE_SIZE], 2>,
+    event_sender: Sender<'static, CriticalSectionRawMutex, [u8; EVENT_RESPONSE_SIZE], 2>,
 ) {
     let flash = Flash::take(sd);
-    let mut event_queue = unwrap!(StorageEventQueue::new(flash, 0).await);
+    let mut event_queue = unwrap!(StorageEventQueue::new(flash).await);
 
     loop {
         let command = command_receiver.receive().await;
@@ -163,13 +164,13 @@ async fn flash_task(
 async fn notify_response_events(
     server: &Server,
     connection: &Connection,
-    events_receiver: Receiver<'_, NoopRawMutex, [u8; EVENT_RESPONSE_SIZE], 2>,
+    events_receiver: Receiver<'_, CriticalSectionRawMutex, [u8; EVENT_RESPONSE_SIZE], 2>,
 ) -> ! {
     loop {
         let response = events_receiver.receive().await;
         if let Err(e) = server
             .pedometer
-            .response_events_notify(&connection, &response)
+            .response_events_notify(connection, &response)
         {
             warn!("Could not send event response! {:?}", e);
         }
@@ -209,7 +210,7 @@ async fn main(spawner: Spawner) {
             _bitfield_1: raw::ble_gap_cfg_role_count_t::new_bitfield_1(0),
         }),
         gap_device_name: Some(raw::ble_gap_cfg_device_name_t {
-            p_value: b"peodmet-rs" as *const u8 as _,
+            p_value: b"pedomet-rs" as *const u8 as _,
             current_len: 10,
             max_len: 10,
             write_perm: unsafe { mem::zeroed() },
@@ -282,7 +283,7 @@ async fn main(spawner: Spawner) {
                     }
                 }
                 PedometerServiceEvent::ResponseEventsCccdWrite { notifications } => {
-                    info!("pedometer notifications: {}", notifications)
+                    info!("pedometer response_events notifications: {}", notifications)
                 }
                 PedometerServiceEvent::DeleteEventsWrite(min_event_index) => {
                     info!("pedometer delete_events: {}", min_event_index);
@@ -291,6 +292,22 @@ async fn main(spawner: Spawner) {
                     {
                         warn!("Could not send command.");
                     }
+                }
+                PedometerServiceEvent::EpochMsWrite(epoch_ms) => {
+                    info!("pedometer time: {}", epoch_ms);
+                    if let Err(TrySendError::Full(_)) = flash_command_channel.try_send(
+                        FlashCommand::PushEvent(PedometerEventType::HostEpochMs(epoch_ms)),
+                    ) {
+                        warn!("Could not send command.");
+                    } else if let Err(e) = server
+                        .pedometer
+                        .epoch_ms_notify(&conn, &Instant::now().as_millis())
+                    {
+                        info!("send notification error: {:?}", e);
+                    }
+                }
+                PedometerServiceEvent::EpochMsCccdWrite { notifications } => {
+                    info!("pedometer host_epoch_ms notifications: {}", notifications)
                 }
             },
         });

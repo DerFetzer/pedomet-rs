@@ -20,7 +20,7 @@ pub struct PedometerEvent {
 pub enum PedometerEventType {
     HostEpochMs(u64),
     Steps(u32),
-    Boot(u32),
+    Boot,
 }
 
 impl PedometerEvent {

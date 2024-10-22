@@ -1,6 +1,6 @@
 use core::{cmp::max, ops::Range};
 
-use defmt::info;
+use defmt::{debug, info};
 use embassy_time::Instant;
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use pedomet_rs_common::{PedometerEvent, PedometerEventType};
@@ -41,31 +41,38 @@ pub(crate) struct StorageEventQueue<S: embedded_storage_async::nor_flash::NorFla
 }
 
 impl<S: MultiwriteNorFlash> StorageEventQueue<S> {
-    pub async fn new(flash: S, boot_id: u32) -> PedometerResult<Self> {
-        info!("FLASH_SIZE: {}, PAGE_SIZE: {}, QUEUE_FLASH_SIZE: {}, QUEUE_FLASH_RANGE: {}, QUEUE_FLASH_PAGE_COUNT: {}", FLASH_SIZE, PAGE_SIZE, QUEUE_FLASH_SIZE, QUEUE_FLASH_RANGE, QUEUE_FLASH_PAGE_COUNT);
+    pub async fn new(flash: S) -> PedometerResult<Self> {
+        debug!("FLASH_SIZE: {}, PAGE_SIZE: {}, QUEUE_FLASH_SIZE: {}, QUEUE_FLASH_RANGE: {}, QUEUE_FLASH_PAGE_COUNT: {}",
+            FLASH_SIZE, PAGE_SIZE, QUEUE_FLASH_SIZE, QUEUE_FLASH_RANGE, QUEUE_FLASH_PAGE_COUNT);
         let mut queue = Self {
             flash,
             cache: PagePointerCache::new(),
             next_event_index: 0,
-            boot_id,
+            boot_id: 0,
         };
 
         let mut max_event_index = 0;
+        let mut max_boot_id = 0;
 
         queue
             .for_each(|event| {
                 max_event_index = max(max_event_index, event.index);
+                max_boot_id = max(max_boot_id, event.boot_id);
                 Ok(HandleEntry {
                     pop: PopEntry::Keep,
                     br: BreakIteration::Continue,
                 })
             })
             .await?;
+        queue.boot_id = max_boot_id + 1;
+        info!("max_boot_id: {}", max_boot_id);
         queue.next_event_index = max_event_index + 1;
         info!("max_event_index: {}", max_event_index);
+        queue.push_event(PedometerEventType::Boot).await?;
         Ok(queue)
     }
 
+    #[allow(unused)]
     pub async fn clear(&mut self) -> PedometerResult<()> {
         Ok(sequential_storage::erase_all(&mut self.flash, QUEUE_FLASH_RANGE).await?)
     }
