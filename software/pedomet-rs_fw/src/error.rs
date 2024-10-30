@@ -4,6 +4,7 @@ pub enum PedometerFwError {
     Misc,
     Flash,
     Postcard,
+    Imu,
 }
 
 impl<S> From<sequential_storage::Error<S>> for PedometerFwError {
@@ -23,6 +24,12 @@ impl From<pedomet_rs_common::PedometerCommonError> for PedometerFwError {
         match value {
             pedomet_rs_common::PedometerCommonError::Postcard => PedometerFwError::Postcard,
         }
+    }
+}
+
+impl From<embedded_hal_async::i2c::ErrorKind> for PedometerFwError {
+    fn from(_value: embedded_hal_async::i2c::ErrorKind) -> Self {
+        PedometerFwError::Imu
     }
 }
 

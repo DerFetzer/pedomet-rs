@@ -68,27 +68,33 @@ impl<S: MultiwriteNorFlash> StorageEventQueue<S> {
         info!("max_boot_id: {}", max_boot_id);
         queue.next_event_index = max_event_index + 1;
         info!("max_event_index: {}", max_event_index);
-        queue.push_event(PedometerEventType::Boot).await?;
+        queue.push_event(PedometerEventType::Boot, None).await?;
         Ok(queue)
     }
 
     #[allow(unused)]
     pub async fn clear(&mut self) -> PedometerResult<()> {
+        info!("Clear flash");
         Ok(sequential_storage::erase_all(&mut self.flash, QUEUE_FLASH_RANGE).await?)
     }
 
-    pub async fn push_event(&mut self, event_type: PedometerEventType) -> PedometerResult<()> {
+    pub async fn push_event(
+        &mut self,
+        event_type: PedometerEventType,
+        timestamp_ms: Option<u64>,
+    ) -> PedometerResult<()> {
         let event_index = self.next_event_index;
         self.next_event_index += 1;
 
         let event = PedometerEvent {
             index: event_index,
-            timestamp_ms: Instant::now().as_millis(),
+            timestamp_ms: timestamp_ms.unwrap_or(Instant::now().as_millis()),
             boot_id: self.boot_id,
             event_type,
         };
 
         let data = event.serialize()?;
+        info!("Push event {} with size {}", event, data.len());
         queue::push(
             &mut self.flash,
             QUEUE_FLASH_RANGE,

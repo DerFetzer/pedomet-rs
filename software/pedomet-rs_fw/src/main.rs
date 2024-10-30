@@ -11,7 +11,8 @@ use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, Receiver, Sender, TrySendError},
 };
-use embassy_time::Instant;
+use embassy_time::{Instant, Timer};
+use imu::Imu;
 #[cfg(not(feature = "defmt"))]
 use panic_halt as _;
 use static_cell::StaticCell;
@@ -22,7 +23,13 @@ use {defmt_rtt as _, panic_probe as _};
 use core::mem;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
-use embassy_nrf::{self as _, interrupt::Priority};
+use embassy_nrf::{
+    self as _, bind_interrupts,
+    gpio::{Input, Level, Output, OutputDrive, Pull},
+    interrupt::{self, InterruptExt, Priority},
+    peripherals::{self, TWISPI0},
+    twim::{self, Frequency, Twim},
+};
 use nrf_softdevice::ble::{gatt_server, peripheral, Connection};
 use nrf_softdevice::{
     ble::advertisement_builder::{
@@ -93,7 +100,7 @@ async fn flash_task(
         info!("Received command: {:?}", command);
         match command {
             FlashCommand::PushEvent(event_type) => {
-                if let Err(e) = event_queue.push_event(event_type).await {
+                if let Err(e) = event_queue.push_event(event_type, None).await {
                     warn!("Could not push event! {:?}", e);
                 }
             }
@@ -177,15 +184,82 @@ async fn notify_response_events(
     }
 }
 
+#[embassy_executor::task]
+async fn imu_task(mut imu: Imu<Twim<'static, TWISPI0>>, mut imu_int: Input<'static>) {
+    unwrap!(imu.dump_all_registers().await);
+
+    unwrap!(imu.init().await);
+    unwrap!(imu.enable_pedometer(true).await);
+    unwrap!(imu.enable_fifo_for_pedometer(None).await);
+    //unwrap!(imu.enable_fifo_for_pedometer(Some(3 * 20)).await);
+    unwrap!(imu.dump_all_registers().await);
+
+    imu_int.wait_for_low().await;
+    loop {
+        select(Timer::after_secs(10 * 60), imu_int.wait_for_rising_edge()).await;
+        info!("Imu interrupt or timer elapsed");
+        let steps = unwrap!(imu.read_steps_from_registers().await);
+        info!(
+            "From registers: {:?}@{}ms",
+            steps,
+            steps.timestamp.as_duration().as_millis()
+        );
+        let timestamp = unwrap!(imu.read_timestamp().await);
+        info!(
+            "Time: {:?}@{:?}",
+            Instant::now().as_millis(),
+            timestamp.as_duration().as_millis()
+        );
+        while let Some(steps) = unwrap!(imu.read_steps_from_fifo().await) {
+            info!(
+                "From FIFO: {:?}@{}ms",
+                steps,
+                steps.timestamp.as_duration().as_millis()
+            );
+        }
+        let timestamp = unwrap!(imu.read_timestamp().await);
+        info!(
+            "{:?}@{:?}",
+            Instant::now().as_millis(),
+            timestamp.as_duration().as_millis()
+        );
+        imu_int.wait_for_low().await;
+    }
+}
+
+bind_interrupts!(struct Irqs {
+    SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+});
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Hello World!");
-
     let mut nrf_hal_config = embassy_nrf::config::Config::default();
     nrf_hal_config.gpiote_interrupt_priority = Priority::P2;
     nrf_hal_config.time_interrupt_priority = Priority::P2;
 
-    let _peripherals = embassy_nrf::init(nrf_hal_config);
+    info!("Init nrf-hal");
+    let peripherals = embassy_nrf::init(nrf_hal_config);
+
+    info!("Init IMU");
+    let mut imu_pwr = Output::new(peripherals.P1_08, Level::Low, OutputDrive::HighDrive);
+    Timer::after_millis(20).await;
+    imu_pwr.set_high();
+    Timer::after_millis(20).await;
+
+    interrupt::SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0.set_priority(interrupt::Priority::P3);
+    let mut twi_config = twim::Config::default();
+    twi_config.frequency = Frequency::K400;
+    let twi = Twim::new(
+        peripherals.TWISPI0,
+        Irqs,
+        peripherals.P0_07,
+        peripherals.P0_27,
+        twi_config,
+    );
+    let imu = Imu::new(twi);
+
+    let imu_int = Input::new(peripherals.P0_11, Pull::None);
+    unwrap!(spawner.spawn(imu_task(imu, imu_int)));
 
     let softdevice_config = nrf_softdevice::Config {
         clock: Some(raw::nrf_clock_lf_cfg_t {
@@ -221,6 +295,7 @@ async fn main(spawner: Spawner) {
         ..Default::default()
     };
 
+    info!("Enable softdevice");
     let sd = Softdevice::enable(&softdevice_config);
 
     let server = unwrap!(Server::new(sd));
@@ -277,9 +352,6 @@ async fn main(spawner: Spawner) {
                         flash_command_channel.try_send(FlashCommand::GetEvents(min_event_index))
                     {
                         warn!("Could not send command.");
-                        if let Err(e) = server.pedometer.response_events_notify(&conn, &[0; 250]) {
-                            info!("send notification error: {:?}", e);
-                        }
                     }
                 }
                 PedometerServiceEvent::ResponseEventsCccdWrite { notifications } => {
