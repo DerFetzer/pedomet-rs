@@ -488,13 +488,13 @@ async fn main(spawner: Spawner) {
 
         match select3(gatt_fut, notify_response_fut, notify_bat_fut).await {
             Either3::First(e) => {
-                info!("gatt_server run exited with error: {:?}", e);
+                warn!("gatt_server run exited with error: {:?}", e);
             }
             Either3::Second(_) => {
-                info!("notify_response exited");
+                warn!("notify_response exited");
             }
             Either3::Third(_) => {
-                info!("notify_bat exited");
+                warn!("notify_bat exited");
             }
         };
     }
