@@ -1,7 +1,7 @@
 # This file was automatically generated.
 
 [target.thumbv7em-none-eabihf]
-runner = 'probe-rs run --chip nRF52840_xxAA --probe 0483:3748'
+runner = ["probe-rs", "run", "--chip", "nRF52840_xxAA",  "--probe", "0483:3748", "--log-format", "{L:severity} {t} {s}"]
 
 [build]
 target = "thumbv7em-none-eabihf"
