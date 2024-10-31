@@ -10,8 +10,6 @@ resolver = "2"
 pedomet-rs_common = { path = "../pedomet-rs_common", features = ["std"] }
 log = "0.4"
 winit = { version = "0.30", features = [ "android-game-activity" ] }
-wgpu = "23.0.0"
-pollster = "0.4"
 egui = "0.29"
 eframe = { version = "0.29", features = [ "wgpu", "android-game-activity" ] }
 tokio = { version = "1.41.0", features = ["full"] }
