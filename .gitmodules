@@ -1,0 +1,6 @@
+[submodule "software/pedomet-rs_gui/submodules/jni-utils-rs"]
+	path = software/pedomet-rs_gui/submodules/jni-utils-rs
+	url = https://github.com/deviceplug/jni-utils-rs
+[submodule "software/pedomet-rs_gui/submodules/btleplug"]
+	path = software/pedomet-rs_gui/submodules/btleplug
+	url = https://github.com/deviceplug/btleplug
