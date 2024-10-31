@@ -1,5 +1,5 @@
 use defmt::{debug, info};
-use embassy_time::Duration;
+use embassy_time::{Duration, Instant};
 use embedded_hal_async::i2c::Error;
 
 use crate::error::PedometerResult;
@@ -50,6 +50,13 @@ impl Timestamp {
     pub fn as_duration(self) -> Duration {
         Duration::from_micros(self.0 as u64 * 6400)
     }
+
+    /// It is always assumed that self is before imu_now and there was at most one timer overflow
+    /// between.
+    pub fn to_instant(self, mcu_now: Instant, imu_now: Self) -> Instant {
+        let imu_time_diff = Self(imu_now.0.overflowing_sub(self.0).0);
+        mcu_now - imu_time_diff.as_duration()
+    }
 }
 
 #[repr(u8)]
@@ -59,6 +66,7 @@ enum Register {
     FifoCtrl4 = 0x09,
     FifoCtrl5 = 0x0A,
     Int1Ctrl = 0x0D,
+    Int2Ctrl = 0x0E,
     Ctrl1Xl = 0x10,
     Ctrl3C = 0x12,
     Ctrl10C = 0x19,
@@ -109,9 +117,9 @@ impl<I: embedded_hal_async::i2c::I2c> Imu<I> {
 
     pub async fn dump_all_registers(&mut self) -> PedometerResult<()> {
         let buf = self.read_all_registers().await?;
-        info!("IMU registers:");
+        debug!("IMU registers:");
         for (i, b) in buf.iter().enumerate() {
-            info!("0x{0:02x}: 0x{1:02x} (0b{1:08b})", i, *b);
+            debug!("0x{0:02x}: 0x{1:02x} (0b{1:08b})", i, *b);
         }
         Ok(())
     }
@@ -133,6 +141,9 @@ impl<I: embedded_hal_async::i2c::I2c> Imu<I> {
             // 3. Write 80h to INT1_CTRL // Step detector interrupt driven to INT1 pin
             self.write_register(Register::Int1Ctrl as u8, 0x80).await?;
         }
+        // 4. Write 40h to INT2_CTRL // Enable step count overflow interrupt which is not
+        //    connected but resets the counter automatically on overflow
+        self.write_register(Register::Int2Ctrl as u8, 0x40).await?;
         Ok(())
     }
 

@@ -19,7 +19,7 @@ pub struct PedometerEvent {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum PedometerEventType {
     HostEpochMs(u64),
-    Steps(u32),
+    Steps(u16),
     Boot,
 }
 

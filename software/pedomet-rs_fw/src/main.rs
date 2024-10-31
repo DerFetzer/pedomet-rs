@@ -6,13 +6,6 @@ mod fmt;
 mod imu;
 mod storage_event_queue;
 
-use defmt::{info, unwrap, warn};
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
-    channel::{Channel, Receiver, Sender, TrySendError},
-};
-use embassy_time::{Instant, Timer};
-use imu::Imu;
 #[cfg(not(feature = "defmt"))]
 use panic_halt as _;
 use static_cell::StaticCell;
@@ -21,15 +14,24 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 use core::mem;
+use defmt::{info, unwrap, warn};
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either3};
 use embassy_nrf::{
-    self as _, bind_interrupts,
+    bind_interrupts,
     gpio::{Input, Level, Output, OutputDrive, Pull},
     interrupt::{self, InterruptExt, Priority},
     peripherals::{self, TWISPI0},
+    saadc::{self, ChannelConfig, Gain, Oversample, Saadc, Time},
     twim::{self, Frequency, Twim},
 };
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    channel::{Channel, Receiver, Sender, TrySendError},
+    signal::Signal,
+};
+use embassy_time::{Duration, Instant, Timer};
+use imu::Imu;
 use nrf_softdevice::ble::{gatt_server, peripheral, Connection};
 use nrf_softdevice::{
     ble::advertisement_builder::{
@@ -75,7 +77,7 @@ struct Server {
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum FlashCommand {
-    PushEvent(PedometerEventType),
+    PushEvent((PedometerEventType, Option<Instant>)),
     GetEvents(u32),
     DeleteEvents(u32),
 }
@@ -85,6 +87,8 @@ static FLASH_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, FlashC
 static READ_EVENT_CHANNEL: StaticCell<
     Channel<CriticalSectionRawMutex, [u8; EVENT_RESPONSE_SIZE], 2>,
 > = StaticCell::new();
+
+static BAT_SOC_SIGNAL: Signal<CriticalSectionRawMutex, u8> = Signal::new();
 
 #[embassy_executor::task]
 async fn flash_task(
@@ -99,8 +103,11 @@ async fn flash_task(
         let command = command_receiver.receive().await;
         info!("Received command: {:?}", command);
         match command {
-            FlashCommand::PushEvent(event_type) => {
-                if let Err(e) = event_queue.push_event(event_type, None).await {
+            FlashCommand::PushEvent((event_type, instant)) => {
+                if let Err(e) = event_queue
+                    .push_event(event_type, instant.map(|i| i.as_millis()))
+                    .await
+                {
                     warn!("Could not push event! {:?}", e);
                 }
             }
@@ -185,19 +192,86 @@ async fn notify_response_events(
 }
 
 #[embassy_executor::task]
-async fn imu_task(mut imu: Imu<Twim<'static, TWISPI0>>, mut imu_int: Input<'static>) {
+async fn read_battery_task(mut saadc: Saadc<'static, 1>, mut bat_led: Output<'static>) -> ! {
+    loop {
+        let mut buf = [0; 1];
+        saadc.sample(&mut buf).await;
+
+        // 0.6V internal reference, gain 1/3, voltage divider 1/3
+        let voltage_mv = buf[0] as u32 * 1800 / 2_u32.pow(12) * 3;
+
+        // Highly incorrect SOC based on linear interpolation between 3.5V and 4.1V
+        let soc = ((voltage_mv as i32 - 3500) / 6).clamp(0, 100);
+        info!(
+            "Current battery reading: {0} ({0:x}) => {1}mV => {2}%",
+            buf[0], voltage_mv, soc
+        );
+        BAT_SOC_SIGNAL.signal(soc as u8);
+
+        let wait_time = if voltage_mv < 3550 {
+            bat_led.set_low();
+            Timer::after_millis(200).await;
+            bat_led.set_high();
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(300)
+        };
+
+        Timer::after(wait_time).await;
+    }
+}
+
+async fn notify_battery<'a>(server: &Server, connection: &Connection) -> ! {
+    loop {
+        if let Err(e) = server
+            .bas
+            .battery_level_notify(connection, &BAT_SOC_SIGNAL.wait().await)
+        {
+            warn!("Could not send event response! {:?}", e);
+        }
+        Timer::after_secs(5).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn imu_task(
+    mut imu: Imu<Twim<'static, TWISPI0>>,
+    mut imu_int: Input<'static>,
+    flash_command_sender: Sender<'static, CriticalSectionRawMutex, FlashCommand, 4>,
+) {
     unwrap!(imu.dump_all_registers().await);
 
     unwrap!(imu.init().await);
-    unwrap!(imu.enable_pedometer(true).await);
-    unwrap!(imu.enable_fifo_for_pedometer(None).await);
-    //unwrap!(imu.enable_fifo_for_pedometer(Some(3 * 20)).await);
+    unwrap!(imu.enable_pedometer(false).await);
+    unwrap!(imu.enable_fifo_for_pedometer(Some(3 * 10)).await);
     unwrap!(imu.dump_all_registers().await);
 
     imu_int.wait_for_low().await;
     loop {
         select(Timer::after_secs(10 * 60), imu_int.wait_for_rising_edge()).await;
         info!("Imu interrupt or timer elapsed");
+
+        let mcu_now = Instant::now();
+        let imu_now = unwrap!(imu.read_timestamp().await);
+
+        while let Some(steps) = unwrap!(imu.read_steps_from_fifo().await) {
+            info!(
+                "From FIFO: {:?}@{}ms ({}:{})",
+                steps,
+                steps.timestamp.as_duration().as_millis(),
+                steps.timestamp.to_instant(mcu_now, imu_now).as_millis(),
+                mcu_now.as_millis(),
+            );
+            info!("Send steps to flash");
+            flash_command_sender
+                .send(FlashCommand::PushEvent((
+                    PedometerEventType::Steps(steps.steps),
+                    Some(steps.timestamp.to_instant(mcu_now, imu_now)),
+                )))
+                .await;
+        }
+
+        /*
         let steps = unwrap!(imu.read_steps_from_registers().await);
         info!(
             "From registers: {:?}@{}ms",
@@ -205,16 +279,19 @@ async fn imu_task(mut imu: Imu<Twim<'static, TWISPI0>>, mut imu_int: Input<'stat
             steps.timestamp.as_duration().as_millis()
         );
         let timestamp = unwrap!(imu.read_timestamp().await);
+        let mcu_now = Instant::now();
         info!(
             "Time: {:?}@{:?}",
             Instant::now().as_millis(),
-            timestamp.as_duration().as_millis()
+            timestamp.as_duration().as_millis(),
         );
         while let Some(steps) = unwrap!(imu.read_steps_from_fifo().await) {
             info!(
-                "From FIFO: {:?}@{}ms",
+                "From FIFO: {:?}@{}ms ({}:{})",
                 steps,
-                steps.timestamp.as_duration().as_millis()
+                steps.timestamp.as_duration().as_millis(),
+                steps.timestamp.to_instant(mcu_now, timestamp).as_millis(),
+                mcu_now.as_millis(),
             );
         }
         let timestamp = unwrap!(imu.read_timestamp().await);
@@ -223,12 +300,14 @@ async fn imu_task(mut imu: Imu<Twim<'static, TWISPI0>>, mut imu_int: Input<'stat
             Instant::now().as_millis(),
             timestamp.as_duration().as_millis()
         );
+        */
         imu_int.wait_for_low().await;
     }
 }
 
 bind_interrupts!(struct Irqs {
     SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    SAADC => saadc::InterruptHandler;
 });
 
 #[embassy_executor::main]
@@ -238,7 +317,10 @@ async fn main(spawner: Spawner) {
     nrf_hal_config.time_interrupt_priority = Priority::P2;
 
     info!("Init nrf-hal");
-    let peripherals = embassy_nrf::init(nrf_hal_config);
+    let mut peripherals = embassy_nrf::init(nrf_hal_config);
+
+    info!("Enable battery monitoring");
+    let _read_bat_en = Output::new(peripherals.P0_14, Level::Low, OutputDrive::Standard);
 
     info!("Init IMU");
     let mut imu_pwr = Output::new(peripherals.P1_08, Level::Low, OutputDrive::HighDrive);
@@ -259,7 +341,22 @@ async fn main(spawner: Spawner) {
     let imu = Imu::new(twi);
 
     let imu_int = Input::new(peripherals.P0_11, Pull::None);
-    unwrap!(spawner.spawn(imu_task(imu, imu_int)));
+
+    // Battery
+    interrupt::SAADC.set_priority(interrupt::Priority::P3);
+    let mut saadc_config = saadc::Config::default();
+    saadc_config.oversample = Oversample::OVER16X;
+    let mut saadc_channel_config = ChannelConfig::single_ended(&mut peripherals.P0_31);
+    saadc_channel_config.gain = Gain::GAIN1_3;
+    saadc_channel_config.time = Time::_40US;
+
+    let saadc_bat = Saadc::new(
+        peripherals.SAADC,
+        Irqs,
+        saadc_config,
+        [saadc_channel_config],
+    );
+    let bat_led = Output::new(peripherals.P0_26, Level::High, OutputDrive::HighDrive);
 
     let softdevice_config = nrf_softdevice::Config {
         clock: Some(raw::nrf_clock_lf_cfg_t {
@@ -310,6 +407,9 @@ async fn main(spawner: Spawner) {
         read_event_channel.sender()
     )));
 
+    unwrap!(spawner.spawn(imu_task(imu, imu_int, flash_command_channel.sender())));
+    unwrap!(spawner.spawn(read_battery_task(saadc_bat, bat_led)));
+
     static ADV_DATA: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
         .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
         .services_16(ServiceList::Complete, &[ServiceUuid16::BATTERY])
@@ -322,8 +422,6 @@ async fn main(spawner: Spawner) {
             &[0x9e7312e0_2354_11eb_9f10_fbc30a62cf38_u128.to_le_bytes()],
         )
         .build();
-
-    unwrap!(server.bas.battery_level_set(&0xab));
 
     loop {
         let config = peripheral::Config::default();
@@ -368,7 +466,7 @@ async fn main(spawner: Spawner) {
                 PedometerServiceEvent::EpochMsWrite(epoch_ms) => {
                     info!("pedometer time: {}", epoch_ms);
                     if let Err(TrySendError::Full(_)) = flash_command_channel.try_send(
-                        FlashCommand::PushEvent(PedometerEventType::HostEpochMs(epoch_ms)),
+                        FlashCommand::PushEvent((PedometerEventType::HostEpochMs(epoch_ms), None)),
                     ) {
                         warn!("Could not send command.");
                     } else if let Err(e) = server
@@ -386,12 +484,17 @@ async fn main(spawner: Spawner) {
         let notify_response_fut =
             notify_response_events(&server, &conn, read_event_channel.receiver());
 
-        match select(gatt_fut, notify_response_fut).await {
-            Either::First(e) => {
+        let notify_bat_fut = notify_battery(&server, &conn);
+
+        match select3(gatt_fut, notify_response_fut, notify_bat_fut).await {
+            Either3::First(e) => {
                 info!("gatt_server run exited with error: {:?}", e);
             }
-            Either::Second(_) => {
+            Either3::Second(_) => {
                 info!("notify_response exited");
+            }
+            Either3::Third(_) => {
+                info!("notify_bat exited");
             }
         };
     }
