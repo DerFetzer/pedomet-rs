@@ -10,6 +10,8 @@
 local.properties
 *.so
 
+events.db
+*.log
 
 # Added by cargo
 

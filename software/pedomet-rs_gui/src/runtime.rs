@@ -61,12 +61,7 @@ pub(crate) fn create_runtime_and_block<F: Future>(future: F) -> F::Output {
             let env = vm.attach_current_thread().unwrap();
 
             let thread = env
-                .call_static_method(
-                    "java/lang/Thread",
-                    "currentThread",
-                    "()Ljava/lang/Thread;",
-                    &[],
-                )
+                .call_static_method("java/lang/Thread", "currentThread", "()Ljava/lang/Thread;", &[])
                 .unwrap()
                 .l()
                 .unwrap();

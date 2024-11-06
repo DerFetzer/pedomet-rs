@@ -24,21 +24,9 @@ pub static JAVAVM: OnceLock<JavaVM> = OnceLock::new();
 
 pub fn setup_class_loader(env: &JNIEnv) -> Result<GlobalRef, AndroidError> {
     let thread = env
-        .call_static_method(
-            "java/lang/Thread",
-            "currentThread",
-            "()Ljava/lang/Thread;",
-            &[],
-        )?
+        .call_static_method("java/lang/Thread", "currentThread", "()Ljava/lang/Thread;", &[])?
         .l()?;
-    let class_loader = env
-        .call_method(
-            thread,
-            "getContextClassLoader",
-            "()Ljava/lang/ClassLoader;",
-            &[],
-        )?
-        .l()?;
+    let class_loader = env.call_method(thread, "getContextClassLoader", "()Ljava/lang/ClassLoader;", &[])?.l()?;
 
     Ok(env.new_global_ref(class_loader)?)
 }
