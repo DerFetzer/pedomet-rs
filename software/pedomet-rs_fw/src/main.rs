@@ -243,7 +243,7 @@ async fn imu_task(
 
     unwrap!(imu.init().await);
     unwrap!(imu.enable_pedometer(false).await);
-    unwrap!(imu.enable_fifo_for_pedometer(Some(3 * 10)).await);
+    unwrap!(imu.enable_fifo_for_pedometer(Some(3 * 10 / 2)).await); // Threshold is in words
     unwrap!(imu.dump_all_registers().await);
 
     imu_int.wait_for_low().await;
