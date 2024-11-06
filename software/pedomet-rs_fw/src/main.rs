@@ -223,13 +223,13 @@ async fn read_battery_task(mut saadc: Saadc<'static, 1>, mut bat_led: Output<'st
 
 async fn notify_battery<'a>(server: &Server, connection: &Connection) -> ! {
     loop {
-        if let Err(e) = server
-            .bas
-            .battery_level_notify(connection, &BAT_SOC_SIGNAL.wait().await)
-        {
+        let soc = BAT_SOC_SIGNAL.wait().await;
+        if let Err(e) = server.bas.battery_level_notify(connection, &soc) {
             warn!("Could not send event response! {:?}", e);
+            unwrap!(server.bas.battery_level_set(&soc));
+        } else {
+            info!("Sent battery notification");
         }
-        Timer::after_secs(5).await;
     }
 }
 
@@ -481,6 +481,11 @@ async fn main(spawner: Spawner) {
                 }
             },
         });
+
+        if let Some(soc) = BAT_SOC_SIGNAL.try_take() {
+            unwrap!(server.bas.battery_level_set(&soc));
+        }
+
         let notify_response_fut =
             notify_response_events(&server, &conn, read_event_channel.receiver());
 
