@@ -1,5 +1,7 @@
 use anyhow::anyhow;
-use btleplug::api::{Central, Characteristic, Manager as _, Peripheral as _, ScanFilter};
+use btleplug::api::{
+    Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, ValueNotification,
+};
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::StreamExt;
 use log::{debug, error, info, warn};
@@ -85,7 +87,9 @@ impl PedometerDeviceHandler {
                     PedometerDeviceHandlerCommand::DeleteEvents {
                         max_event_id,
                         responder,
-                    } => {}
+                    } => {
+                        todo!()
+                    }
                     PedometerDeviceHandlerCommand::Exit => break,
                 }
             }
@@ -130,125 +134,28 @@ impl PedometerDeviceHandler {
                     warn!("Could not find characteristic: {}", uuid);
                 }
             }
-            info!("Send current time to device...");
-            let epoch_ms_char = find_characteristic(device, CHARACTERISTIC_UUID_EPOCH_MS).unwrap();
-            device
-                .write(
-                    &epoch_ms_char,
-                    &((OffsetDateTime::now_utc().unix_timestamp_nanos() / 1000 / 1000) as u64)
-                        .to_le_bytes(),
-                    btleplug::api::WriteType::WithResponse,
-                )
-                .await
-                .unwrap();
+            self.send_host_epoch().await?;
 
             let mut notification_stream = device.notifications().await?;
             let db_command_sender = self.db_cmd_sender.clone();
             let ble_command_sender = self.ble_cmd_sender.clone();
             tokio::spawn(async move {
-                while let Some(mut notification) = notification_stream.next().await {
+                while let Some(notification) = notification_stream.next().await {
                     let mut event_queue = VecDeque::new();
                     let mut device_time_offsets = HashMap::new();
                     let mut max_time_offset_boot_id = 0;
                     match notification.uuid {
                         CHARACTERISTIC_UUID_RESPONSE_EVENTS => {
-                            info!("Got event response");
-                            let mut buf = &mut notification.value[..];
-                            let mut max_event_id = 0;
-                            let mut received_events = false;
-                            while let Ok((event, rest)) =
-                                PedometerEvent::deserialize_from_transport(buf)
-                            {
-                                received_events = true;
-                                buf = rest;
-                                info!("Got event from device: {event:?}");
-                                max_event_id = max(event.index, max_event_id);
-                                debug!("Set max_event_id to {max_event_id}");
-                                match event.event_type {
-                                    PedometerEventType::HostEpochMs(host_epoch_ms) => {
-                                        if host_epoch_ms >= event.timestamp_ms {
-                                            device_time_offsets.insert(
-                                                event.boot_id,
-                                                Duration::from_millis(
-                                                    host_epoch_ms - event.timestamp_ms,
-                                                ),
-                                            );
-                                            max_time_offset_boot_id =
-                                                max(max_time_offset_boot_id, event.boot_id);
-                                        } else {
-                                            warn!("Got invalid host epoch event: {event:?}");
-                                        }
-                                    }
-                                    PedometerEventType::Steps(_) => event_queue.push_back(event),
-                                    PedometerEventType::Boot => {}
-                                }
-                            }
-                            let mut events_retain = Vec::with_capacity(event_queue.len());
-                            for event in &event_queue {
-                                if let PedometerEventType::Steps(_) = event.event_type {
-                                    match device_time_offsets.get(&event.boot_id) {
-                                        None if event.boot_id < max_time_offset_boot_id => {
-                                            warn!("Dropped step event because the device time offset could not be determined anymore: {event:?}");
-                                            events_retain.push(false);
-                                            continue;
-                                        }
-                                        None => {
-                                            info!("Wait for timestamp");
-                                            events_retain.push(true);
-                                        }
-                                        Some(offset) => {
-                                            match PedometerPersistenceEvent::from_common_event(
-                                                *event, *offset,
-                                            ) {
-                                                Ok(persistence_event) => {
-                                                    let (responder_tx, responder_rx) =
-                                                        oneshot::channel();
-                                                    info!(
-                                                        "Send event to db: {persistence_event:?}"
-                                                    );
-                                                    if let Err(e) = db_command_sender.try_send(
-                                                        PedometerDatabaseCommand::AddEvent {
-                                                            event: persistence_event,
-                                                            responder: responder_tx,
-                                                        },
-                                                    ) {
-                                                        warn!("Could not send event to database! ({e})");
-                                                        events_retain.push(true);
-                                                    } else if let Err(e) = responder_rx.await {
-                                                        warn!("Could not add event to db: {e}");
-                                                        events_retain.push(false);
-                                                    } else {
-                                                        events_retain.push(false);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    warn!(
-                                                        "Could not convert event: {event:?} -> {e}"
-                                                    );
-                                                    events_retain.push(false);
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    error!("This event should not be here! {event:?}");
-                                }
-                            }
-                            info!("Max event id: {max_event_id}");
-                            if received_events {
-                                info!("Try to read more events");
-
-                                let (resp_tx, _resp_rx) = oneshot::channel();
-                                let _ = ble_command_sender
-                                    .send(PedometerDeviceHandlerCommand::RequestEvents {
-                                        min_event_id: Some(max_event_id + 1),
-                                        responder: resp_tx,
-                                    })
-                                    .await;
-                            }
-                            info!("Retain events: {event_queue:?} {events_retain:?}");
-                            let mut retain_iter = events_retain.iter();
-                            event_queue.retain(|_| *retain_iter.next().unwrap());
+                            info!("Received event response");
+                            Self::process_event_response(
+                                notification,
+                                &mut event_queue,
+                                &mut device_time_offsets,
+                                &mut max_time_offset_boot_id,
+                                &db_command_sender,
+                                &ble_command_sender,
+                            )
+                            .await;
                         }
                         CHARACTERISTIC_UUID_EPOCH_MS => {
                             // Process event instead
@@ -264,6 +171,101 @@ impl PedometerDeviceHandler {
             });
         }
         Ok(())
+    }
+
+    async fn process_event_response(
+        mut notification: ValueNotification,
+        event_queue: &mut VecDeque<PedometerEvent>,
+        device_time_offsets: &mut HashMap<u32, Duration>,
+        max_time_offset_boot_id: &mut u32,
+        db_command_sender: &mpsc::Sender<PedometerDatabaseCommand>,
+        ble_command_sender: &mpsc::Sender<PedometerDeviceHandlerCommand>,
+    ) {
+        info!("Got event response");
+        let mut buf = &mut notification.value[..];
+        let mut max_event_id = 0;
+        let mut received_events = false;
+        while let Ok((event, rest)) = PedometerEvent::deserialize_from_transport(buf) {
+            received_events = true;
+            buf = rest;
+            info!("Got event from device: {event:?}");
+            max_event_id = max(event.index, max_event_id);
+            debug!("Set max_event_id to {max_event_id}");
+            match event.event_type {
+                PedometerEventType::HostEpochMs(host_epoch_ms) => {
+                    if host_epoch_ms >= event.timestamp_ms {
+                        device_time_offsets.insert(
+                            event.boot_id,
+                            Duration::from_millis(host_epoch_ms - event.timestamp_ms),
+                        );
+                        *max_time_offset_boot_id = max(*max_time_offset_boot_id, event.boot_id);
+                    } else {
+                        warn!("Got invalid host epoch event: {event:?}");
+                    }
+                }
+                PedometerEventType::Steps(_) => event_queue.push_back(event),
+                PedometerEventType::Boot => {}
+            }
+        }
+        let mut events_retain = Vec::with_capacity(event_queue.len());
+        for event in event_queue.iter() {
+            if let PedometerEventType::Steps(_) = event.event_type {
+                match device_time_offsets.get(&event.boot_id) {
+                    None if event.boot_id < *max_time_offset_boot_id => {
+                        warn!("Dropped step event because the device time offset could not be determined anymore: {event:?}");
+                        events_retain.push(false);
+                        continue;
+                    }
+                    None => {
+                        info!("Wait for timestamp");
+                        events_retain.push(true);
+                    }
+                    Some(offset) => {
+                        match PedometerPersistenceEvent::from_common_event(*event, *offset) {
+                            Ok(persistence_event) => {
+                                let (responder_tx, responder_rx) = oneshot::channel();
+                                info!("Send event to db: {persistence_event:?}");
+                                if let Err(e) =
+                                    db_command_sender.try_send(PedometerDatabaseCommand::AddEvent {
+                                        event: persistence_event,
+                                        responder: responder_tx,
+                                    })
+                                {
+                                    warn!("Could not send event to database! ({e})");
+                                    events_retain.push(true);
+                                } else if let Err(e) = responder_rx.await {
+                                    warn!("Could not add event to db: {e}");
+                                    events_retain.push(false);
+                                } else {
+                                    events_retain.push(false);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Could not convert event: {event:?} -> {e}");
+                                events_retain.push(false);
+                            }
+                        }
+                    }
+                }
+            } else {
+                error!("This event should not be here! {event:?}");
+            }
+        }
+        info!("Max event id: {max_event_id}");
+        if received_events {
+            info!("Try to read more events");
+
+            let (resp_tx, _resp_rx) = oneshot::channel();
+            let _ = ble_command_sender
+                .send(PedometerDeviceHandlerCommand::RequestEvents {
+                    min_event_id: Some(max_event_id + 1),
+                    responder: resp_tx,
+                })
+                .await;
+        }
+        info!("Retain events: {event_queue:?} {events_retain:?}");
+        let mut retain_iter = events_retain.iter();
+        event_queue.retain(|_| *retain_iter.next().unwrap());
     }
 
     async fn is_connected(&self) -> anyhow::Result<bool> {
@@ -288,6 +290,23 @@ impl PedometerDeviceHandler {
             None => Err(anyhow!("Device not seen, yet"))?,
         };
         Ok(())
+    }
+
+    async fn send_host_epoch(&self) -> anyhow::Result<()> {
+        if let Some(device) = &self.device {
+            info!("Send current time to device...");
+            let epoch_ms_char = find_characteristic(device, CHARACTERISTIC_UUID_EPOCH_MS).unwrap();
+            Ok(device
+                .write(
+                    &epoch_ms_char,
+                    &((OffsetDateTime::now_utc().unix_timestamp_nanos() / 1000 / 1000) as u64)
+                        .to_le_bytes(),
+                    btleplug::api::WriteType::WithResponse,
+                )
+                .await?)
+        } else {
+            Ok(())
+        }
     }
 }
 
