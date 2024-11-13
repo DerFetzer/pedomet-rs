@@ -1,29 +1,23 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use tokio::sync::{mpsc, oneshot};
-use winit::event;
+use tokio::sync::oneshot;
 
 use crate::{
-    ble::PedometerDeviceHandlerCommand,
-    persistence::{PedometerDatabaseCommand, PedometerDatabaseGetEventsInTimeRangeReceiver},
+    ble::{PedometerDeviceHandlerCommand, BLE_CMD_TX},
+    persistence::{
+        PedometerDatabaseCommand, PedometerDatabaseGetEventsInTimeRangeReceiver, DB_CMD_TX,
+    },
 };
 
 pub(crate) struct PedometerApp {
     state: PedometerAppState,
-    database_cmd_tx: mpsc::Sender<PedometerDatabaseCommand>,
-    device_cmd_tx: mpsc::Sender<PedometerDeviceHandlerCommand>,
     events_rx: MessageReceiver<PedometerDatabaseGetEventsInTimeRangeReceiver>,
     event_id: u32,
 }
 
 impl PedometerApp {
-    pub(crate) fn new(
-        database_cmd_tx: mpsc::Sender<PedometerDatabaseCommand>,
-        device_cmd_tx: mpsc::Sender<PedometerDeviceHandlerCommand>,
-    ) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            database_cmd_tx,
-            device_cmd_tx,
             state: Default::default(),
             events_rx: Default::default(),
             event_id: 0,
@@ -38,7 +32,7 @@ impl eframe::App for PedometerApp {
             if ui.button("Events aus DB holen").clicked() {
                 let (resp_tx, resp_rx) = oneshot::channel();
                 self.events_rx.receiver = Some(resp_rx);
-                let _ = self.database_cmd_tx.blocking_send(
+                let _ = DB_CMD_TX.get().unwrap().blocking_send(
                     PedometerDatabaseCommand::GetEventsInTimeRange {
                         start: OffsetDateTime::UNIX_EPOCH,
                         end: OffsetDateTime::now_utc(),
@@ -48,15 +42,13 @@ impl eframe::App for PedometerApp {
             };
             if ui.button("Try connect...").clicked() {
                 let (resp_tx, _resp_rx) = oneshot::channel();
-                let _ =
-                    self.device_cmd_tx
-                        .blocking_send(PedometerDeviceHandlerCommand::TryConnect {
-                            responder: resp_tx,
-                        });
+                let _ = BLE_CMD_TX.get().unwrap().blocking_send(
+                    PedometerDeviceHandlerCommand::TryConnect { responder: resp_tx },
+                );
             };
             if ui.button("Request events...").clicked() {
                 let (resp_tx, _resp_rx) = oneshot::channel();
-                let _ = self.device_cmd_tx.blocking_send(
+                let _ = BLE_CMD_TX.get().unwrap().blocking_send(
                     PedometerDeviceHandlerCommand::RequestEvents {
                         min_event_id: Some(self.event_id),
                         responder: resp_tx,

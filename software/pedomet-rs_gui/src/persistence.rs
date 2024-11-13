@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
 use anyhow::anyhow;
 use app_dirs2::{app_root, AppDataType};
@@ -12,6 +12,8 @@ use tokio::{
 };
 
 use crate::{error::PedometerGuiError, APP_INFO};
+
+pub static DB_CMD_TX: OnceLock<mpsc::Sender<PedometerDatabaseCommand>> = OnceLock::new();
 
 #[derive(Debug, Copy, Clone, FromRow)]
 pub(crate) struct PedometerPersistenceEvent {

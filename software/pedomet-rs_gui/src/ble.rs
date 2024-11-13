@@ -8,13 +8,14 @@ use log::{debug, error, info, warn};
 use pedomet_rs_common::{PedometerEvent, PedometerEventType};
 use std::cmp::max;
 use std::collections::{HashMap, VecDeque};
+use std::sync::OnceLock;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::persistence::{PedometerDatabaseCommand, PedometerPersistenceEvent};
+use crate::persistence::{PedometerDatabaseCommand, PedometerPersistenceEvent, DB_CMD_TX};
 
 /// Only devices whose name contains this string will be tried.
 const PERIPHERAL_NAME_MATCH_FILTER: &str = "pedomet-rs";
@@ -37,19 +38,16 @@ const SUB_CHARACTERISTICS: [Uuid; 3] = [
     CHARACTERISTIC_UUID_RESPONSE_EVENTS,
 ];
 
+pub static BLE_CMD_TX: OnceLock<mpsc::Sender<PedometerDeviceHandlerCommand>> = OnceLock::new();
+
 #[derive(Debug)]
 pub(crate) struct PedometerDeviceHandler {
-    db_cmd_sender: mpsc::Sender<PedometerDatabaseCommand>,
-    ble_cmd_sender: mpsc::Sender<PedometerDeviceHandlerCommand>,
     adapter: Adapter,
     device: Option<Peripheral>,
 }
 
 impl PedometerDeviceHandler {
-    pub(crate) async fn new(
-        db_cmd_sender: mpsc::Sender<PedometerDatabaseCommand>,
-        ble_cmd_sender: mpsc::Sender<PedometerDeviceHandlerCommand>,
-    ) -> anyhow::Result<Self> {
+    pub(crate) async fn new() -> anyhow::Result<Self> {
         let manager = Manager::new().await?;
         let adapter_list = manager.adapters().await?;
         if adapter_list.is_empty() {
@@ -57,8 +55,6 @@ impl PedometerDeviceHandler {
         }
         let adapter = adapter_list.first().unwrap().clone();
         Ok(Self {
-            db_cmd_sender,
-            ble_cmd_sender,
             adapter,
             device: None,
         })
@@ -137,8 +133,6 @@ impl PedometerDeviceHandler {
             self.send_host_epoch().await?;
 
             let mut notification_stream = device.notifications().await?;
-            let db_command_sender = self.db_cmd_sender.clone();
-            let ble_command_sender = self.ble_cmd_sender.clone();
             tokio::spawn(async move {
                 while let Some(notification) = notification_stream.next().await {
                     let mut event_queue = VecDeque::new();
@@ -152,8 +146,6 @@ impl PedometerDeviceHandler {
                                 &mut event_queue,
                                 &mut device_time_offsets,
                                 &mut max_time_offset_boot_id,
-                                &db_command_sender,
-                                &ble_command_sender,
                             )
                             .await;
                         }
@@ -178,8 +170,6 @@ impl PedometerDeviceHandler {
         event_queue: &mut VecDeque<PedometerEvent>,
         device_time_offsets: &mut HashMap<u32, Duration>,
         max_time_offset_boot_id: &mut u32,
-        db_command_sender: &mpsc::Sender<PedometerDatabaseCommand>,
-        ble_command_sender: &mpsc::Sender<PedometerDeviceHandlerCommand>,
     ) {
         info!("Got event response");
         let mut buf = &mut notification.value[..];
@@ -225,12 +215,12 @@ impl PedometerDeviceHandler {
                             Ok(persistence_event) => {
                                 let (responder_tx, responder_rx) = oneshot::channel();
                                 info!("Send event to db: {persistence_event:?}");
-                                if let Err(e) =
-                                    db_command_sender.try_send(PedometerDatabaseCommand::AddEvent {
+                                if let Err(e) = DB_CMD_TX.get().unwrap().try_send(
+                                    PedometerDatabaseCommand::AddEvent {
                                         event: persistence_event,
                                         responder: responder_tx,
-                                    })
-                                {
+                                    },
+                                ) {
                                     warn!("Could not send event to database! ({e})");
                                     events_retain.push(true);
                                 } else if let Err(e) = responder_rx.await {
@@ -256,7 +246,9 @@ impl PedometerDeviceHandler {
             info!("Try to read more events");
 
             let (resp_tx, _resp_rx) = oneshot::channel();
-            let _ = ble_command_sender
+            let _ = BLE_CMD_TX
+                .get()
+                .unwrap()
                 .send(PedometerDeviceHandlerCommand::RequestEvents {
                     min_event_id: Some(max_event_id + 1),
                     responder: resp_tx,

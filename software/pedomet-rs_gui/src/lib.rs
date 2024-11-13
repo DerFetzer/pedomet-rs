@@ -7,11 +7,11 @@ mod persistence;
 mod runtime;
 
 use app_dirs2::AppInfo;
-use ble::{PedometerDeviceHandler, PedometerDeviceHandlerCommand};
+use ble::{PedometerDeviceHandler, PedometerDeviceHandlerCommand, BLE_CMD_TX};
 use eframe::{NativeOptions, Renderer};
 use gui::PedometerApp;
 use log::{debug, error, info};
-use persistence::{PedometerDatabase, PedometerDatabaseCommand};
+use persistence::{PedometerDatabase, PedometerDatabaseCommand, DB_CMD_TX};
 use std::path::Path;
 use tokio::sync::{mpsc, watch::Sender};
 #[cfg(target_os = "android")]
@@ -24,9 +24,7 @@ pub const APP_INFO: AppInfo = AppInfo {
 
 fn tokio_thread(
     database_cmd_rx: mpsc::Receiver<PedometerDatabaseCommand>,
-    database_cmd_tx: mpsc::Sender<PedometerDatabaseCommand>,
     device_cmd_rx: mpsc::Receiver<PedometerDeviceHandlerCommand>,
-    device_cmd_tx: mpsc::Sender<PedometerDeviceHandlerCommand>,
 ) {
     debug!("tokio_thread");
     runtime::create_runtime_and_block(async {
@@ -36,7 +34,7 @@ fn tokio_thread(
             .unwrap()
             .spawn_message_handler(database_cmd_rx)
             .await;
-        let dev_handle = PedometerDeviceHandler::new(database_cmd_tx, device_cmd_tx)
+        let dev_handle = PedometerDeviceHandler::new()
             .await
             .unwrap()
             .spawn_message_handler(device_cmd_rx)
@@ -51,27 +49,20 @@ fn _main(mut options: NativeOptions) -> eframe::Result<()> {
     info!("Hello pedomet-rs!");
 
     let (database_cmd_tx, database_cmd_rx) = mpsc::channel(1000);
-    let database_cmd_tx_clone = database_cmd_tx.clone();
     let (device_cmd_tx, device_cmd_rx) = mpsc::channel(1000);
-    let device_cmd_tx_clone = device_cmd_tx.clone();
+    BLE_CMD_TX.get_or_init(|| device_cmd_tx);
+    DB_CMD_TX.get_or_init(|| database_cmd_tx);
 
     let thread_builder = std::thread::Builder::new().name("tokio".to_string());
     thread_builder
-        .spawn(move || {
-            tokio_thread(
-                database_cmd_rx,
-                database_cmd_tx_clone,
-                device_cmd_rx,
-                device_cmd_tx_clone,
-            )
-        })
+        .spawn(move || tokio_thread(database_cmd_rx, device_cmd_rx))
         .expect("Could not spawn tokio thread");
 
     options.renderer = Renderer::Wgpu;
     eframe::run_native(
         "My egui App",
         options,
-        Box::new(|_cc| Ok(Box::new(PedometerApp::new(database_cmd_tx, device_cmd_tx)))),
+        Box::new(|_cc| Ok(Box::new(PedometerApp::new()))),
     )
 }
 
