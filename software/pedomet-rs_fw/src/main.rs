@@ -8,7 +8,6 @@ mod storage_event_queue;
 
 #[cfg(not(feature = "defmt"))]
 use panic_halt as _;
-use static_cell::StaticCell;
 
 #[cfg(feature = "defmt")]
 use {defmt_rtt as _, panic_probe as _};
@@ -41,6 +40,7 @@ use nrf_softdevice::{
 };
 use nrf_softdevice::{raw, Softdevice};
 use pedomet_rs_common::PedometerEventType;
+use static_cell::StaticCell;
 use storage_event_queue::{BreakIteration, HandleEntry, PopEntry, StorageEventQueue};
 
 #[embassy_executor::task]
