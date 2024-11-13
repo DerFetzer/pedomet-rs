@@ -6,6 +6,8 @@ mod gui;
 mod persistence;
 mod runtime;
 
+#[cfg(target_os = "android")]
+use app_dirs2::app_root;
 use app_dirs2::AppInfo;
 use ble::{PedometerDeviceHandler, PedometerDeviceHandlerCommand, BLE_CMD_TX};
 use eframe::{NativeOptions, Renderer};
@@ -75,14 +77,14 @@ fn android_main(app: AndroidApp) {
     use winit::platform::android::EventLoopBuilderExtAndroid;
 
     android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Debug),
+        android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
 
     let options = NativeOptions {
         event_loop_builder: Some(Box::new(move |builder| {
             builder.with_android_app(app);
         })),
-        persistence_path: Some(app_root(AppDataType::UserConfig, &APP_INFO)),
+        persistence_path: Some(app_root(AppDataType::UserConfig, &APP_INFO).unwrap()),
         ..Default::default()
     };
 
