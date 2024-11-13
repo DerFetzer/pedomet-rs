@@ -3,4 +3,5 @@
 	url = https://github.com/deviceplug/jni-utils-rs
 [submodule "software/pedomet-rs_gui/submodules/btleplug"]
 	path = software/pedomet-rs_gui/submodules/btleplug
-	url = https://github.com/deviceplug/btleplug
+	url = https://github.com/DerFetzer/btleplug
+	branch = pedomet-rs
