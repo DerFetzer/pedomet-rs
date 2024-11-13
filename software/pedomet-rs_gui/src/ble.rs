@@ -171,7 +171,10 @@ impl PedometerDeviceHandler {
         device_time_offsets: &mut HashMap<u32, Duration>,
         max_time_offset_boot_id: &mut u32,
     ) {
-        info!("Got event response");
+        info!(
+            "Got event response with length: {}",
+            notification.value.len()
+        );
         let mut buf = &mut notification.value[..];
         let mut max_event_id = 0;
         let mut received_events = false;
