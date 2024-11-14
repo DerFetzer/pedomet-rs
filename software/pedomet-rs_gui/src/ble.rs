@@ -3,6 +3,7 @@ use btleplug::api::{
     Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, ValueNotification,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
+use chrono::Utc;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use pedomet_rs_common::{PedometerEvent, PedometerEventType};
@@ -10,7 +11,6 @@ use std::cmp::max;
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 use std::time::Duration;
-use time::OffsetDateTime;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -20,14 +20,13 @@ use crate::persistence::{PedometerDatabaseCommand, PedometerPersistenceEvent, DB
 /// Only devices whose name contains this string will be tried.
 const PERIPHERAL_NAME_MATCH_FILTER: &str = "pedomet-rs";
 
-/// Service
-const SERVICE_UUID_PEDOMETER: Uuid = Uuid::from_u128(0x1C2A0000_ABF2_4B98_BA1C_25D5EA728525);
 /// Characteristics
 const CHARACTERISTIC_UUID_SOC: Uuid = Uuid::from_u128(0x00002A19_0000_1000_8000_00805F9B34FB);
 const CHARACTERISTIC_UUID_REQUEST_EVENTS: Uuid =
     Uuid::from_u128(0x1C2A0001_ABF2_4B98_BA1C_25D5EA728525);
 const CHARACTERISTIC_UUID_RESPONSE_EVENTS: Uuid =
     Uuid::from_u128(0x1C2A0002_ABF2_4B98_BA1C_25D5EA728525);
+#[allow(unused)]
 const CHARACTERISTIC_UUID_DELETE_EVENTS: Uuid =
     Uuid::from_u128(0x1C2A0003_ABF2_4B98_BA1C_25D5EA728525);
 const CHARACTERISTIC_UUID_EPOCH_MS: Uuid = Uuid::from_u128(0x1C2A0004_ABF2_4B98_BA1C_25D5EA728525);
@@ -42,22 +41,12 @@ pub static BLE_CMD_TX: OnceLock<mpsc::Sender<PedometerDeviceHandlerCommand>> = O
 
 #[derive(Debug)]
 pub(crate) struct PedometerDeviceHandler {
-    adapter: Adapter,
     device: Option<Peripheral>,
 }
 
 impl PedometerDeviceHandler {
     pub(crate) async fn new() -> anyhow::Result<Self> {
-        let manager = Manager::new().await?;
-        let adapter_list = manager.adapters().await?;
-        if adapter_list.is_empty() {
-            error!("Could not find any adapters");
-        }
-        let adapter = adapter_list.first().unwrap().clone();
-        Ok(Self {
-            adapter,
-            device: None,
-        })
+        Ok(Self { device: None })
     }
 
     pub(crate) async fn spawn_message_handler(
@@ -97,9 +86,17 @@ impl PedometerDeviceHandler {
             return Ok(());
         }
         if self.device.is_none() {
-            info!("Starting scan on {}...", self.adapter.adapter_info().await?);
+            let manager = Manager::new().await?;
+            let adapter_list = manager.adapters().await?;
+            if adapter_list.is_empty() {
+                error!("Could not find any adapters");
+                return Err(anyhow!("Could not find any adapters"));
+            }
+            let adapter = adapter_list.first().unwrap().clone();
 
-            self.adapter
+            info!("Starting scan on {}...", adapter.adapter_info().await?);
+
+            adapter
                 .start_scan(ScanFilter {
                     //services: vec![SERVICE_UUID_PEDOMETER],
                     services: vec![],
@@ -108,7 +105,7 @@ impl PedometerDeviceHandler {
 
             tokio::time::sleep(Duration::from_secs(5)).await;
 
-            if let Ok(Some(device)) = find_device(&self.adapter).await {
+            if let Ok(Some(device)) = find_device(&adapter).await {
                 info!("Found device: {:?}", device);
                 self.device = Some(device);
             } else {
@@ -275,7 +272,8 @@ impl PedometerDeviceHandler {
             Some(device) if device.is_connected().await? => {
                 device
                     .write(
-                        &find_characteristic(device, CHARACTERISTIC_UUID_REQUEST_EVENTS).unwrap(),
+                        &find_characteristic(device, CHARACTERISTIC_UUID_REQUEST_EVENTS)
+                            .ok_or_else(|| anyhow!("Could not find characteristic"))?,
                         &min_event_id.to_le_bytes(),
                         btleplug::api::WriteType::WithResponse,
                     )
@@ -290,12 +288,12 @@ impl PedometerDeviceHandler {
     async fn send_host_epoch(&self) -> anyhow::Result<()> {
         if let Some(device) = &self.device {
             info!("Send current time to device...");
-            let epoch_ms_char = find_characteristic(device, CHARACTERISTIC_UUID_EPOCH_MS).unwrap();
+            let epoch_ms_char = find_characteristic(device, CHARACTERISTIC_UUID_EPOCH_MS)
+                .ok_or_else(|| anyhow!("Could not find characteristic"))?;
             Ok(device
                 .write(
                     &epoch_ms_char,
-                    &((OffsetDateTime::now_utc().unix_timestamp_nanos() / 1000 / 1000) as u64)
-                        .to_le_bytes(),
+                    &((Utc::now().timestamp_millis()) as u64).to_le_bytes(),
                     btleplug::api::WriteType::WithResponse,
                 )
                 .await?)

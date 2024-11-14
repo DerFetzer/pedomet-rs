@@ -2,10 +2,10 @@ use std::{sync::OnceLock, time::Duration};
 
 use anyhow::anyhow;
 use app_dirs2::{app_root, AppDataType};
+use chrono::{DateTime, Utc};
 use log::{info, warn};
 use pedomet_rs_common::{PedometerEvent, PedometerEventType};
 use sqlx::{prelude::FromRow, SqlitePool};
-use time::{OffsetDateTime, UtcOffset};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -40,10 +40,8 @@ impl PedometerPersistenceEvent {
         })
     }
 
-    pub fn get_date_time(&self) -> anyhow::Result<OffsetDateTime> {
-        Ok(OffsetDateTime::from_unix_timestamp_nanos(
-            self.event_id as i128 * 1000 * 1000,
-        )?)
+    pub fn get_date_time(&self) -> anyhow::Result<DateTime<Utc>> {
+        DateTime::from_timestamp_millis(self.timestamp_ms).ok_or_else(|| anyhow!("Invalid epoch"))
     }
 }
 
@@ -110,13 +108,11 @@ impl PedometerDatabase {
 
     async fn get_events_in_time_range(
         &self,
-        start: OffsetDateTime,
-        end: OffsetDateTime,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
     ) -> anyhow::Result<Vec<PedometerPersistenceEvent>> {
-        let start_ms: i64 =
-            (start.to_offset(UtcOffset::UTC).unix_timestamp_nanos() / 1000 / 1000).try_into()?;
-        let end_ms: i64 =
-            (end.to_offset(UtcOffset::UTC).unix_timestamp_nanos() / 1000 / 1000).try_into()?;
+        let start_ms: i64 = start.timestamp_millis();
+        let end_ms: i64 = end.timestamp_millis();
         Ok(sqlx::query_as!(
             PedometerPersistenceEvent,
             "
@@ -152,8 +148,8 @@ pub(crate) enum PedometerDatabaseCommand {
         responder: oneshot::Sender<anyhow::Result<()>>,
     },
     GetEventsInTimeRange {
-        start: OffsetDateTime,
-        end: OffsetDateTime,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
         responder: oneshot::Sender<anyhow::Result<Vec<PedometerPersistenceEvent>>>,
     },
     Exit,
