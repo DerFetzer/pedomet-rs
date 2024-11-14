@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-use egui::{DragValue, ScrollArea, Slider, TopBottomPanel};
+use egui::{DragValue, Margin, ScrollArea, Slider, TopBottomPanel, Vec2};
 use egui_extras::DatePickerButton;
 use egui_plot::{uniform_grid_spacer, Bar, BarChart, HLine, Plot};
 use log::{debug, info};
@@ -42,16 +42,26 @@ impl PedometerApp {
 
 impl eframe::App for PedometerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.events_rx.current.is_none() {
+            self.get_events();
+        }
+
         ctx.set_zoom_factor(1.4);
-        ctx.style_mut(|style| style.spacing.slider_width = 150.0);
+        ctx.style_mut(|style| {
+            style.spacing.slider_width = 140.0;
+            style.spacing.button_padding = Vec2::new(12.0, 4.0);
+        });
+
         if self.events_rx.try_recv() {
             self.request_repaint = false;
         }
+
         self.draw_header(ctx);
         self.draw_footer(ctx);
         self.draw_main_view(ctx);
+
         if self.request_repaint {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
 
@@ -219,34 +229,26 @@ impl PedometerApp {
     fn draw_main_view_debug(&mut self, ui: &mut egui::Ui) {
         ui.add(egui::DragValue::new(&mut self.event_id));
         if ui.button("Events aus DB holen").clicked() {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            self.events_rx.receiver = Some(resp_rx);
-            DB_CMD_TX
-                .get()
-                .unwrap()
-                .blocking_send(PedometerDatabaseCommand::GetEventsInTimeRange {
-                    start: DateTime::UNIX_EPOCH,
-                    end: Utc::now(),
-                    responder: resp_tx,
-                })
-                .unwrap();
-            self.request_repaint = true;
+            self.get_events();
         };
         if ui.button("Try connect...").clicked() {
             let (resp_tx, _resp_rx) = oneshot::channel();
-            let _ = BLE_CMD_TX
+            BLE_CMD_TX
                 .get()
                 .unwrap()
-                .blocking_send(PedometerDeviceHandlerCommand::TryConnect { responder: resp_tx });
+                .blocking_send(PedometerDeviceHandlerCommand::TryConnect { responder: resp_tx })
+                .unwrap();
         };
         if ui.button("Request events...").clicked() {
             let (resp_tx, _resp_rx) = oneshot::channel();
-            let _ = BLE_CMD_TX.get().unwrap().blocking_send(
-                PedometerDeviceHandlerCommand::RequestEvents {
+            BLE_CMD_TX
+                .get()
+                .unwrap()
+                .blocking_send(PedometerDeviceHandlerCommand::RequestEvents {
                     min_event_id: Some(self.event_id),
                     responder: resp_tx,
-                },
-            );
+                })
+                .unwrap();
         };
         if let Some(events) = &self.events_rx.current {
             if let Err(err) = events {
@@ -263,13 +265,30 @@ impl PedometerApp {
     }
 
     fn draw_footer(&mut self, ctx: &egui::Context) {
-        TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
-                for view in MainView::iter() {
-                    ui.selectable_value(&mut self.state.main_view, view, view.to_string());
-                }
+        TopBottomPanel::bottom("bottom_panel")
+            .exact_height(50.)
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    for view in MainView::iter() {
+                        ui.selectable_value(&mut self.state.main_view, view, view.to_string());
+                    }
+                });
             });
-        });
+    }
+
+    fn get_events(&mut self) {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.events_rx.receiver = Some(resp_rx);
+        DB_CMD_TX
+            .get()
+            .unwrap()
+            .blocking_send(PedometerDatabaseCommand::GetEventsInTimeRange {
+                start: DateTime::UNIX_EPOCH,
+                end: Utc::now(),
+                responder: resp_tx,
+            })
+            .unwrap();
+        self.request_repaint = true;
     }
 }
 
