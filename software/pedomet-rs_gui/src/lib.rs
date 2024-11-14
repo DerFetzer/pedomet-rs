@@ -64,7 +64,7 @@ fn _main(mut options: NativeOptions) -> eframe::Result<()> {
     eframe::run_native(
         "My egui App",
         options,
-        Box::new(|_cc| Ok(Box::new(PedometerApp::new()))),
+        Box::new(|cc| Ok(Box::new(PedometerApp::new(cc)))),
     )
 }
 
