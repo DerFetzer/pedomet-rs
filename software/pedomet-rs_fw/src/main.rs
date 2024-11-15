@@ -15,7 +15,7 @@ use {defmt_rtt as _, panic_probe as _};
 use core::mem;
 use defmt::{info, unwrap, warn};
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select3, Either3};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_nrf::{
     bind_interrupts,
     gpio::{Input, Level, Output, OutputDrive, Pull},
@@ -66,6 +66,10 @@ struct PedometerService {
     delete_events: u32,
     #[characteristic(uuid = "1c2a0004-abf2-4b98-ba1c-25d5ea728525", notify, write)]
     epoch_ms: u64,
+    #[characteristic(uuid = "1c2a0005-abf2-4b98-ba1c-25d5ea728525", read)]
+    boot_id: u32,
+    #[characteristic(uuid = "1c2a0006-abf2-4b98-ba1c-25d5ea728525", read)]
+    max_event_id: u32,
 }
 
 #[nrf_softdevice::gatt_server]
@@ -89,6 +93,8 @@ static READ_EVENT_CHANNEL: StaticCell<
 > = StaticCell::new();
 
 static BAT_SOC_SIGNAL: Signal<CriticalSectionRawMutex, u8> = Signal::new();
+pub static BOOT_ID_SIGNAL: Signal<CriticalSectionRawMutex, u32> = Signal::new();
+pub static MAX_EVENT_ID_SIGNAL: Signal<CriticalSectionRawMutex, u32> = Signal::new();
 
 #[embassy_executor::task]
 async fn flash_task(
@@ -221,14 +227,22 @@ async fn read_battery_task(mut saadc: Saadc<'static, 1>, mut bat_led: Output<'st
     }
 }
 
-async fn notify_battery<'a>(server: &Server, connection: &Connection) -> ! {
+async fn handle_signals(server: &Server, connection: &Connection) -> ! {
     loop {
-        let soc = BAT_SOC_SIGNAL.wait().await;
-        if let Err(e) = server.bas.battery_level_notify(connection, &soc) {
-            warn!("Could not send event response! {:?}", e);
-            unwrap!(server.bas.battery_level_set(&soc));
-        } else {
-            info!("Sent battery notification");
+        match select(BAT_SOC_SIGNAL.wait(), MAX_EVENT_ID_SIGNAL.wait()).await {
+            Either::First(soc) => {
+                if let Err(e) = server.bas.battery_level_notify(connection, &soc) {
+                    warn!("Could not send event response! {:?}", e);
+                    unwrap!(server.bas.battery_level_set(&soc));
+                } else {
+                    info!("Sent battery notification");
+                }
+            }
+            Either::Second(max_event_id) => {
+                if let Err(e) = server.pedometer.max_event_id_set(&max_event_id) {
+                    warn!("Could not set max_event_id! {:?}", e);
+                }
+            }
         }
     }
 }
@@ -271,36 +285,6 @@ async fn imu_task(
                 .await;
         }
 
-        /*
-        let steps = unwrap!(imu.read_steps_from_registers().await);
-        info!(
-            "From registers: {:?}@{}ms",
-            steps,
-            steps.timestamp.as_duration().as_millis()
-        );
-        let timestamp = unwrap!(imu.read_timestamp().await);
-        let mcu_now = Instant::now();
-        info!(
-            "Time: {:?}@{:?}",
-            Instant::now().as_millis(),
-            timestamp.as_duration().as_millis(),
-        );
-        while let Some(steps) = unwrap!(imu.read_steps_from_fifo().await) {
-            info!(
-                "From FIFO: {:?}@{}ms ({}:{})",
-                steps,
-                steps.timestamp.as_duration().as_millis(),
-                steps.timestamp.to_instant(mcu_now, timestamp).as_millis(),
-                mcu_now.as_millis(),
-            );
-        }
-        let timestamp = unwrap!(imu.read_timestamp().await);
-        info!(
-            "{:?}@{:?}",
-            Instant::now().as_millis(),
-            timestamp.as_duration().as_millis()
-        );
-        */
         imu_int.wait_for_low().await;
     }
 }
@@ -485,11 +469,17 @@ async fn main(spawner: Spawner) {
         if let Some(soc) = BAT_SOC_SIGNAL.try_take() {
             unwrap!(server.bas.battery_level_set(&soc));
         }
+        unwrap!(server
+            .pedometer
+            .boot_id_set(&unwrap!(BOOT_ID_SIGNAL.try_take())));
+        unwrap!(server
+            .pedometer
+            .max_event_id_set(&unwrap!(MAX_EVENT_ID_SIGNAL.try_take())));
 
         let notify_response_fut =
             notify_response_events(&server, &conn, read_event_channel.receiver());
 
-        let notify_bat_fut = notify_battery(&server, &conn);
+        let notify_bat_fut = handle_signals(&server, &conn);
 
         match select3(gatt_fut, notify_response_fut, notify_bat_fut).await {
             Either3::First(e) => {

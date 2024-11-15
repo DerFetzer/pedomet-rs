@@ -6,7 +6,7 @@ use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use pedomet_rs_common::{PedometerEvent, PedometerEventType};
 use sequential_storage::{cache::PagePointerCache, queue};
 
-use crate::error::PedometerResult;
+use crate::{error::PedometerResult, BOOT_ID_SIGNAL, MAX_EVENT_ID_SIGNAL};
 
 const FLASH_SIZE: u32 = 1024 * 1024;
 const PAGE_SIZE: u32 = 4096;
@@ -66,6 +66,7 @@ impl<S: MultiwriteNorFlash> StorageEventQueue<S> {
             .await?;
         queue.boot_id = max_boot_id + 1;
         info!("max_boot_id: {}", max_boot_id);
+        BOOT_ID_SIGNAL.signal(queue.boot_id);
         queue.next_event_index = max_event_index + 1;
         info!("max_event_index: {}", max_event_index);
         queue.push_event(PedometerEventType::Boot, None).await?;
@@ -103,6 +104,7 @@ impl<S: MultiwriteNorFlash> StorageEventQueue<S> {
             true,
         )
         .await?;
+        MAX_EVENT_ID_SIGNAL.signal(event_index);
         Ok(())
     }
 
