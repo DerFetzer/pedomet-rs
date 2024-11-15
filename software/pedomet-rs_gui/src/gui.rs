@@ -31,21 +31,19 @@ impl PedometerApp {
             Default::default()
         };
         info!("Current state: {:?}", state);
-        Self {
+        let mut app = Self {
             state,
             events_rx: Default::default(),
             event_id: 0,
             request_repaint: false,
-        }
+        };
+        app.get_events();
+        app
     }
 }
 
 impl eframe::App for PedometerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.events_rx.receiver.is_none() {
-            self.get_events();
-        }
-
         ctx.set_zoom_factor(1.4);
         ctx.style_mut(|style| {
             style.spacing.slider_width = 140.0;
@@ -124,26 +122,7 @@ impl PedometerApp {
         });
         if date_before != self.state.selected_date {
             debug!("Selected date changed to: {:?}", self.state.selected_date);
-            let (resp_tx, resp_rx) = oneshot::channel();
-            self.events_rx.receiver = Some(resp_rx);
-            DB_CMD_TX
-                .get()
-                .unwrap()
-                .blocking_send(PedometerDatabaseCommand::GetEventsInTimeRange {
-                    start: (self.state.selected_date - Duration::days(6))
-                        .and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-                        .and_local_timezone(Local)
-                        .unwrap()
-                        .to_utc(),
-                    end: (self.state.selected_date + Duration::days(1))
-                        .and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-                        .and_local_timezone(Local)
-                        .unwrap()
-                        .to_utc(),
-                    responder: resp_tx,
-                })
-                .unwrap();
-            self.request_repaint = true;
+            self.get_events();
         }
         ui.separator();
         ui.heading("Tag");
@@ -283,8 +262,16 @@ impl PedometerApp {
             .get()
             .unwrap()
             .blocking_send(PedometerDatabaseCommand::GetEventsInTimeRange {
-                start: DateTime::UNIX_EPOCH,
-                end: Utc::now(),
+                start: (self.state.selected_date - Duration::days(6))
+                    .and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+                    .and_local_timezone(Local)
+                    .unwrap()
+                    .to_utc(),
+                end: (self.state.selected_date + Duration::days(1))
+                    .and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+                    .and_local_timezone(Local)
+                    .unwrap()
+                    .to_utc(),
                 responder: resp_tx,
             })
             .unwrap();

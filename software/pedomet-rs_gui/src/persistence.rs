@@ -113,6 +113,7 @@ impl PedometerDatabase {
     ) -> anyhow::Result<Vec<PedometerPersistenceEvent>> {
         let start_ms: i64 = start.timestamp_millis();
         let end_ms: i64 = end.timestamp_millis();
+        info!("Get events between {} and {}", start_ms, end_ms);
         Ok(sqlx::query_as!(
             PedometerPersistenceEvent,
             "
