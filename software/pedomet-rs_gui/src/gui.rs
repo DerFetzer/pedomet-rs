@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-use egui::{DragValue, Margin, ScrollArea, Slider, TopBottomPanel, Vec2};
+use egui::{ScrollArea, Slider, TopBottomPanel, Vec2};
 use egui_extras::DatePickerButton;
 use egui_plot::{uniform_grid_spacer, Bar, BarChart, HLine, Plot};
 use log::{debug, info};
@@ -42,7 +42,7 @@ impl PedometerApp {
 
 impl eframe::App for PedometerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.events_rx.current.is_none() {
+        if self.events_rx.receiver.is_none() {
             self.get_events();
         }
 
