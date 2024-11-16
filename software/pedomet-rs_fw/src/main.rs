@@ -27,7 +27,7 @@ use embassy_nrf::{
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, Receiver, Sender, TrySendError},
-    signal::Signal,
+    watch::Watch,
 };
 use embassy_time::{Duration, Instant, Timer};
 use imu::Imu;
@@ -68,7 +68,7 @@ struct PedometerService {
     epoch_ms: u64,
     #[characteristic(uuid = "1c2a0005-abf2-4b98-ba1c-25d5ea728525", read)]
     boot_id: u32,
-    #[characteristic(uuid = "1c2a0006-abf2-4b98-ba1c-25d5ea728525", read)]
+    #[characteristic(uuid = "1c2a0006-abf2-4b98-ba1c-25d5ea728525", read, notify)]
     max_event_id: u32,
 }
 
@@ -92,9 +92,9 @@ static READ_EVENT_CHANNEL: StaticCell<
     Channel<CriticalSectionRawMutex, [u8; EVENT_RESPONSE_SIZE], 2>,
 > = StaticCell::new();
 
-static BAT_SOC_SIGNAL: Signal<CriticalSectionRawMutex, u8> = Signal::new();
-pub static BOOT_ID_SIGNAL: Signal<CriticalSectionRawMutex, u32> = Signal::new();
-pub static MAX_EVENT_ID_SIGNAL: Signal<CriticalSectionRawMutex, u32> = Signal::new();
+static BAT_SOC_WATCH: Watch<CriticalSectionRawMutex, u8, 2> = Watch::new();
+pub static BOOT_ID_WATCH: Watch<CriticalSectionRawMutex, u32, 2> = Watch::new();
+pub static MAX_EVENT_ID_WATCH: Watch<CriticalSectionRawMutex, u32, 2> = Watch::new();
 
 #[embassy_executor::task]
 async fn flash_task(
@@ -103,7 +103,7 @@ async fn flash_task(
     event_sender: Sender<'static, CriticalSectionRawMutex, [u8; EVENT_RESPONSE_SIZE], 2>,
 ) {
     let flash = Flash::take(sd);
-    let mut event_queue = unwrap!(StorageEventQueue::new(flash).await);
+    let mut event_queue = unwrap!(StorageEventQueue::new(flash, false).await);
 
     loop {
         let command = command_receiver.receive().await;
@@ -199,6 +199,7 @@ async fn notify_response_events(
 
 #[embassy_executor::task]
 async fn read_battery_task(mut saadc: Saadc<'static, 1>, mut bat_led: Output<'static>) -> ! {
+    let soc_sender = BAT_SOC_WATCH.sender();
     loop {
         let mut buf = [0; 1];
         saadc.sample(&mut buf).await;
@@ -212,7 +213,7 @@ async fn read_battery_task(mut saadc: Saadc<'static, 1>, mut bat_led: Output<'st
             "Current battery reading: {0} ({0:x}) => {1}mV => {2}%",
             buf[0], voltage_mv, soc
         );
-        BAT_SOC_SIGNAL.signal(soc as u8);
+        soc_sender.send(soc as u8);
 
         let wait_time = if voltage_mv < 3550 {
             bat_led.set_low();
@@ -228,19 +229,27 @@ async fn read_battery_task(mut saadc: Saadc<'static, 1>, mut bat_led: Output<'st
 }
 
 async fn handle_signals(server: &Server, connection: &Connection) -> ! {
+    let mut soc_rx = unwrap!(BAT_SOC_WATCH.receiver());
+    let mut max_event_id_rx = unwrap!(MAX_EVENT_ID_WATCH.receiver());
     loop {
-        match select(BAT_SOC_SIGNAL.wait(), MAX_EVENT_ID_SIGNAL.wait()).await {
+        match select(soc_rx.changed(), max_event_id_rx.changed()).await {
             Either::First(soc) => {
                 if let Err(e) = server.bas.battery_level_notify(connection, &soc) {
-                    warn!("Could not send event response! {:?}", e);
+                    warn!("Could not send soc notification! {:?}", e);
                     unwrap!(server.bas.battery_level_set(&soc));
                 } else {
                     info!("Sent battery notification");
                 }
             }
             Either::Second(max_event_id) => {
-                if let Err(e) = server.pedometer.max_event_id_set(&max_event_id) {
-                    warn!("Could not set max_event_id! {:?}", e);
+                if let Err(e) = server
+                    .pedometer
+                    .max_event_id_notify(connection, &max_event_id)
+                {
+                    warn!("Could not set max_event_id notification! {:?}", e);
+                    unwrap!(server.pedometer.max_event_id_set(&max_event_id));
+                } else {
+                    info!("Sent max_event_id notification");
                 }
             }
         }
@@ -463,18 +472,21 @@ async fn main(spawner: Spawner) {
                 PedometerServiceEvent::EpochMsCccdWrite { notifications } => {
                     info!("pedometer host_epoch_ms notifications: {}", notifications)
                 }
+                PedometerServiceEvent::MaxEventIdCccdWrite { notifications } => {
+                    info!("pedometer max_event_id notifications: {}", notifications)
+                }
             },
         });
 
-        if let Some(soc) = BAT_SOC_SIGNAL.try_take() {
+        if let Some(soc) = BAT_SOC_WATCH.try_get() {
             unwrap!(server.bas.battery_level_set(&soc));
         }
         unwrap!(server
             .pedometer
-            .boot_id_set(&unwrap!(BOOT_ID_SIGNAL.try_take())));
+            .boot_id_set(&unwrap!(BOOT_ID_WATCH.try_get())));
         unwrap!(server
             .pedometer
-            .max_event_id_set(&unwrap!(MAX_EVENT_ID_SIGNAL.try_take())));
+            .max_event_id_set(&unwrap!(MAX_EVENT_ID_WATCH.try_get())));
 
         let notify_response_fut =
             notify_response_events(&server, &conn, read_event_channel.receiver());
