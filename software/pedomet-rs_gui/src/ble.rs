@@ -83,6 +83,9 @@ impl PedometerDeviceHandler {
                     } => {
                         todo!()
                     }
+                    PedometerDeviceHandlerCommand::Disconnect { responder } => {
+                        let _ = responder.send(self.disconnect().await);
+                    }
                     PedometerDeviceHandlerCommand::Exit => break,
                 }
             }
@@ -227,14 +230,14 @@ impl PedometerDeviceHandler {
                 }
             });
         }
-        info!("Send connected event");
-        if let Err(e) = GUI_EVENT_TX
-            .get()
-            .unwrap()
-            .send(crate::gui::PedometerGuiEvent::Connected)
-            .await
-        {
-            error!("Could not send gui connected event: {e}");
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> anyhow::Result<()> {
+        if let Some(device) = &self.device {
+            if device.is_connected().await? {
+                device.disconnect().await?;
+            }
         }
         Ok(())
     }
@@ -338,6 +341,15 @@ impl PedometerDeviceHandler {
         info!("Retain events: {event_queue:?} {events_retain:?}");
         let mut retain_iter = events_retain.iter();
         event_queue.retain(|_| *retain_iter.next().unwrap());
+
+        if let Err(e) = GUI_EVENT_TX
+            .get()
+            .unwrap()
+            .send(crate::gui::PedometerGuiEvent::NewEvents)
+            .await
+        {
+            error!("Could not send gui new_events event: {e}");
+        }
     }
 
     async fn is_connected(&self) -> anyhow::Result<bool> {
@@ -397,6 +409,9 @@ pub(crate) enum PedometerDeviceHandlerCommand {
     DeleteEvents {
         max_event_id: Option<u32>,
         responder: oneshot::Sender<anyhow::Result<()>>,
+    },
+    Disconnect {
+        responder: oneshot::Sender<Result<(), anyhow::Error>>,
     },
     Exit,
 }

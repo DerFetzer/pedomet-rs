@@ -1,7 +1,8 @@
 use chrono::{Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
-use egui::{ScrollArea, Slider, TopBottomPanel, Vec2};
+use egui::{Align2, Button, Direction, Frame, Margin, ScrollArea, Slider, TopBottomPanel, Vec2};
 use egui_extras::DatePickerButton;
-use egui_plot::{uniform_grid_spacer, Bar, BarChart, HLine, Plot};
+use egui_plot::{uniform_grid_spacer, Bar, BarChart, HLine, Legend, Plot};
+use egui_toast::{ToastKind, Toasts};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::{cmp::min, sync::OnceLock};
@@ -21,9 +22,11 @@ pub static GUI_EVENT_TX: OnceLock<mpsc::Sender<PedometerGuiEvent>> = OnceLock::n
 pub(crate) struct PedometerApp {
     state: PedometerAppState,
     db_events_rx: MessageReceiver<PedometerDatabaseGetEventsInTimeRangeReceiver>,
+    connect_events_rx: MessageReceiver<anyhow::Result<()>>,
     gui_events_rx: mpsc::Receiver<PedometerGuiEvent>,
     event_id: u32,
-    request_repaint: bool,
+    request_repaint_db: bool,
+    request_repaint_ble: bool,
     connected: bool,
     soc: Option<u8>,
 }
@@ -43,9 +46,11 @@ impl PedometerApp {
         let mut app = Self {
             state,
             db_events_rx: Default::default(),
+            connect_events_rx: Default::default(),
             gui_events_rx,
             event_id: 0,
-            request_repaint: false,
+            request_repaint_db: false,
+            request_repaint_ble: false,
             connected: false,
             soc: None,
         };
@@ -56,6 +61,10 @@ impl PedometerApp {
 
 impl eframe::App for PedometerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut toasts = Toasts::new()
+            .anchor(Align2::LEFT_TOP, (10.0, 10.0))
+            .direction(Direction::TopDown);
+
         ctx.set_zoom_factor(1.4);
         ctx.style_mut(|style| {
             style.spacing.slider_width = 140.0;
@@ -69,15 +78,45 @@ impl eframe::App for PedometerApp {
                 events.map(transform_events_to_relative_steps)
             },
         )) {
-            self.request_repaint = false;
+            self.request_repaint_db = false;
+            if let Some(Err(e)) = &self.db_events_rx.current {
+                toasts.add(egui_toast::Toast {
+                    kind: ToastKind::Error,
+                    text: format!("Es ist ein Fehler aufgetreten:\n{}", e).into(),
+                    ..Default::default()
+                });
+            }
+        }
+
+        if self
+            .connect_events_rx
+            .try_recv(None::<fn(anyhow::Result<()>) -> anyhow::Result<()>>)
+        {
+            self.request_repaint_ble = false;
+            if let Some(Err(e)) = &self.connect_events_rx.current {
+                toasts.add(egui_toast::Toast {
+                    kind: ToastKind::Error,
+                    text: format!("Es ist ein Fehler aufgetreten:\n{}", e).into(),
+                    ..Default::default()
+                });
+            } else {
+                if self.connected {
+                    self.soc = None;
+                }
+                self.connected = !self.connected;
+            }
         }
 
         self.draw_header(ctx);
         self.draw_footer(ctx);
         self.draw_main_view(ctx);
 
-        if self.request_repaint {
+        toasts.show(ctx);
+
+        if self.request_repaint_db || self.request_repaint_ble {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs(5));
         }
     }
 
@@ -126,23 +165,66 @@ enum MainView {
 
 impl PedometerApp {
     fn draw_header(&mut self, ctx: &egui::Context) {
-        TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            ui.heading("pedomet-rs");
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "Schrittzähler {}",
-                    if self.connected {
-                        "verbunden"
-                    } else {
-                        "getrennt"
+        TopBottomPanel::top("top_panel")
+            .frame(Frame {
+                inner_margin: Margin::symmetric(8.0, 12.0),
+                ..Frame::side_top_panel(&ctx.style())
+            })
+            .show(ctx, |ui| {
+                ui.heading("pedomet-rs");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Schrittzähler {}",
+                        if self.connected {
+                            "verbunden"
+                        } else {
+                            "getrennt"
+                        }
+                    ));
+                    if let Some(soc) = self.soc {
+                        ui.label(format!("🔋{}%", soc));
                     }
-                ));
-                if let Some(soc) = self.soc {
-                    ui.label(format!("🔋{}%", soc));
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !self.request_repaint_ble,
+                            Button::new(if self.connected {
+                                "Trennen..."
+                            } else {
+                                "Verbinden..."
+                            }),
+                        )
+                        .clicked()
+                    {
+                        let (resp_tx, resp_rx) = oneshot::channel();
+                        self.connect_events_rx.receiver = Some(resp_rx);
+                        let event = if !self.connected {
+                            PedometerDeviceHandlerCommand::TryConnect { responder: resp_tx }
+                        } else {
+                            PedometerDeviceHandlerCommand::Disconnect { responder: resp_tx }
+                        };
+                        BLE_CMD_TX.get().unwrap().blocking_send(event).unwrap();
+                        self.request_repaint_ble = true;
+                    }
+                });
+                ui.add_space(12.0);
+                if ui
+                    .add_enabled(self.connected, Button::new("Schritte abrufen"))
+                    .clicked()
+                {
+                    let (resp_tx, _resp_rx) = oneshot::channel();
+                    BLE_CMD_TX
+                        .get()
+                        .unwrap()
+                        .blocking_send(PedometerDeviceHandlerCommand::RequestEvents {
+                            min_event_id: Some(self.event_id),
+                            responder: resp_tx,
+                        })
+                        .unwrap();
                 }
             });
-        });
     }
 
     fn draw_main_view(&mut self, ctx: &egui::Context) {
@@ -198,6 +280,7 @@ impl PedometerApp {
                 .clamp_grid(true)
                 .x_grid_spacer(uniform_grid_spacer(|_| [6., 3., 1.]))
                 .y_axis_min_width(40.)
+                .set_margin_fraction((0.0, 0.1).into())
                 .reset()
                 .show(ui, |plot_ui| {
                     plot_ui.bar_chart(BarChart::new(bars));
@@ -241,9 +324,15 @@ impl PedometerApp {
                 .x_grid_spacer(uniform_grid_spacer(|_| [2., 2., 1.]))
                 .y_axis_min_width(40.)
                 .clamp_grid(true)
+                .set_margin_fraction((0.0, 0.1).into())
+                .legend(Legend::default())
                 .reset()
                 .show(ui, |plot_ui| {
-                    plot_ui.hline(HLine::new(self.state.daily_target).name("Schrittziel"));
+                    plot_ui.hline(
+                        HLine::new(self.state.daily_target)
+                            .name("Schrittziel")
+                            .highlight(true),
+                    );
                     plot_ui.bar_chart(BarChart::new(bars));
                 });
         }
@@ -262,25 +351,6 @@ impl PedometerApp {
         if ui.button("Events aus DB holen").clicked() {
             self.get_db_events();
         };
-        if ui.button("Try connect...").clicked() {
-            let (resp_tx, _resp_rx) = oneshot::channel();
-            BLE_CMD_TX
-                .get()
-                .unwrap()
-                .blocking_send(PedometerDeviceHandlerCommand::TryConnect { responder: resp_tx })
-                .unwrap();
-        };
-        if ui.button("Request events...").clicked() {
-            let (resp_tx, _resp_rx) = oneshot::channel();
-            BLE_CMD_TX
-                .get()
-                .unwrap()
-                .blocking_send(PedometerDeviceHandlerCommand::RequestEvents {
-                    min_event_id: Some(self.event_id),
-                    responder: resp_tx,
-                })
-                .unwrap();
-        };
         if let Some(events) = &self.db_events_rx.current {
             if let Err(err) = events {
                 ui.label(format!("Error: {err}"));
@@ -297,7 +367,10 @@ impl PedometerApp {
 
     fn draw_footer(&mut self, ctx: &egui::Context) {
         TopBottomPanel::bottom("bottom_panel")
-            .exact_height(50.)
+            .frame(Frame {
+                inner_margin: Margin::symmetric(8.0, 12.0),
+                ..Frame::side_top_panel(&ctx.style())
+            })
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     for view in MainView::iter() {
@@ -327,7 +400,7 @@ impl PedometerApp {
                 responder: resp_tx,
             })
             .unwrap();
-        self.request_repaint = true;
+        self.request_repaint_db = true;
     }
 
     fn recv_events(&mut self) {
@@ -335,11 +408,11 @@ impl PedometerApp {
             info!("Received gui event: {:?}", event);
             match event {
                 PedometerGuiEvent::Soc(soc) => self.soc = Some(soc),
-                PedometerGuiEvent::Connected => self.connected = true,
                 PedometerGuiEvent::Disconnected => {
                     self.soc = None;
                     self.connected = false;
                 }
+                PedometerGuiEvent::NewEvents => self.get_db_events(),
             }
         }
     }
@@ -398,6 +471,6 @@ impl<T> MessageReceiver<T> {
 #[derive(Debug)]
 pub(crate) enum PedometerGuiEvent {
     Soc(u8),
-    Connected,
     Disconnected,
+    NewEvents,
 }
