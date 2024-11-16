@@ -11,7 +11,7 @@ use app_dirs2::app_root;
 use app_dirs2::AppInfo;
 use ble::{PedometerDeviceHandler, PedometerDeviceHandlerCommand, BLE_CMD_TX};
 use eframe::{NativeOptions, Renderer};
-use gui::PedometerApp;
+use gui::{PedometerApp, GUI_EVENT_TX};
 use log::{debug, error, info};
 use persistence::{PedometerDatabase, PedometerDatabaseCommand, DB_CMD_TX};
 use std::path::Path;
@@ -52,8 +52,10 @@ fn _main(mut options: NativeOptions) -> eframe::Result<()> {
 
     let (database_cmd_tx, database_cmd_rx) = mpsc::channel(1000);
     let (device_cmd_tx, device_cmd_rx) = mpsc::channel(1000);
+    let (gui_events_tx, gui_events_rx) = mpsc::channel(1000);
     BLE_CMD_TX.get_or_init(|| device_cmd_tx);
     DB_CMD_TX.get_or_init(|| database_cmd_tx);
+    GUI_EVENT_TX.get_or_init(|| gui_events_tx);
 
     let thread_builder = std::thread::Builder::new().name("tokio".to_string());
     thread_builder
@@ -64,7 +66,7 @@ fn _main(mut options: NativeOptions) -> eframe::Result<()> {
     eframe::run_native(
         "My egui App",
         options,
-        Box::new(|cc| Ok(Box::new(PedometerApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(PedometerApp::new(cc, gui_events_rx)))),
     )
 }
 

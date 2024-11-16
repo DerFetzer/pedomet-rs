@@ -1,29 +1,38 @@
-use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+use chrono::{Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use egui::{ScrollArea, Slider, TopBottomPanel, Vec2};
 use egui_extras::DatePickerButton;
 use egui_plot::{uniform_grid_spacer, Bar, BarChart, HLine, Plot};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
-use std::cmp::min;
+use std::{cmp::min, sync::OnceLock};
 use strum::{EnumIter, IntoEnumIterator};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     ble::{PedometerDeviceHandlerCommand, BLE_CMD_TX},
     persistence::{
-        PedometerDatabaseCommand, PedometerDatabaseGetEventsInTimeRangeReceiver, DB_CMD_TX,
+        PedometerDatabaseCommand, PedometerDatabaseGetEventsInTimeRangeReceiver,
+        PedometerPersistenceEvent, DB_CMD_TX,
     },
 };
 
+pub static GUI_EVENT_TX: OnceLock<mpsc::Sender<PedometerGuiEvent>> = OnceLock::new();
+
 pub(crate) struct PedometerApp {
     state: PedometerAppState,
-    events_rx: MessageReceiver<PedometerDatabaseGetEventsInTimeRangeReceiver>,
+    db_events_rx: MessageReceiver<PedometerDatabaseGetEventsInTimeRangeReceiver>,
+    gui_events_rx: mpsc::Receiver<PedometerGuiEvent>,
     event_id: u32,
     request_repaint: bool,
+    connected: bool,
+    soc: Option<u8>,
 }
 
 impl PedometerApp {
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub(crate) fn new(
+        cc: &eframe::CreationContext<'_>,
+        gui_events_rx: mpsc::Receiver<PedometerGuiEvent>,
+    ) -> Self {
         let state = if let Some(storage) = cc.storage {
             info!("Get state from storage");
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
@@ -33,11 +42,14 @@ impl PedometerApp {
         info!("Current state: {:?}", state);
         let mut app = Self {
             state,
-            events_rx: Default::default(),
+            db_events_rx: Default::default(),
+            gui_events_rx,
             event_id: 0,
             request_repaint: false,
+            connected: false,
+            soc: None,
         };
-        app.get_events();
+        app.get_db_events();
         app
     }
 }
@@ -50,7 +62,13 @@ impl eframe::App for PedometerApp {
             style.spacing.button_padding = Vec2::new(12.0, 4.0);
         });
 
-        if self.events_rx.try_recv() {
+        self.recv_events();
+
+        if self.db_events_rx.try_recv(Some(
+            |events: anyhow::Result<Vec<PedometerPersistenceEvent>>| {
+                events.map(transform_events_to_relative_steps)
+            },
+        )) {
             self.request_repaint = false;
         }
 
@@ -73,6 +91,26 @@ impl eframe::App for PedometerApp {
     }
 }
 
+fn transform_events_to_relative_steps(
+    mut events: Vec<PedometerPersistenceEvent>,
+) -> Vec<PedometerPersistenceEvent> {
+    if events.is_empty() {
+        return events;
+    }
+    let first_steps = events.first().unwrap().steps;
+    events = events
+        .into_iter()
+        .scan(first_steps, |last_steps, mut event| {
+            let event_steps = event.steps as u16;
+            event.steps = (event_steps).overflowing_sub(*last_steps as u16).0 as i64;
+            *last_steps = event_steps as i64;
+            Some(event)
+        })
+        .collect();
+    info!("Mapped events: {events:?}");
+    events
+}
+
 #[derive(
     Debug, Copy, Clone, Default, PartialEq, EnumIter, strum::Display, Serialize, Deserialize,
 )]
@@ -90,6 +128,20 @@ impl PedometerApp {
     fn draw_header(&mut self, ctx: &egui::Context) {
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.heading("pedomet-rs");
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "Schrittzähler {}",
+                    if self.connected {
+                        "verbunden"
+                    } else {
+                        "getrennt"
+                    }
+                ));
+                if let Some(soc) = self.soc {
+                    ui.label(format!("🔋{}%", soc));
+                }
+            });
         });
     }
 
@@ -122,11 +174,11 @@ impl PedometerApp {
         });
         if date_before != self.state.selected_date {
             debug!("Selected date changed to: {:?}", self.state.selected_date);
-            self.get_events();
+            self.get_db_events();
         }
         ui.separator();
         ui.heading("Tag");
-        if let Some(Ok(events)) = &self.events_rx.current {
+        if let Some(Ok(events)) = &self.db_events_rx.current {
             let mut bars: Vec<_> = (0..24)
                 .map(|h| Bar::new(h as f64, 0.0).width(1.0))
                 .collect();
@@ -153,7 +205,7 @@ impl PedometerApp {
         }
         ui.separator();
         ui.heading("Woche");
-        if let Some(Ok(events)) = &self.events_rx.current {
+        if let Some(Ok(events)) = &self.db_events_rx.current {
             let mut bars: Vec<_> = (0..7)
                 .map(|i| {
                     let day = self.state.selected_date - Duration::days(i);
@@ -208,7 +260,7 @@ impl PedometerApp {
     fn draw_main_view_debug(&mut self, ui: &mut egui::Ui) {
         ui.add(egui::DragValue::new(&mut self.event_id));
         if ui.button("Events aus DB holen").clicked() {
-            self.get_events();
+            self.get_db_events();
         };
         if ui.button("Try connect...").clicked() {
             let (resp_tx, _resp_rx) = oneshot::channel();
@@ -229,7 +281,7 @@ impl PedometerApp {
                 })
                 .unwrap();
         };
-        if let Some(events) = &self.events_rx.current {
+        if let Some(events) = &self.db_events_rx.current {
             if let Err(err) = events {
                 ui.label(format!("Error: {err}"));
             } else {
@@ -255,9 +307,9 @@ impl PedometerApp {
             });
     }
 
-    fn get_events(&mut self) {
+    fn get_db_events(&mut self) {
         let (resp_tx, resp_rx) = oneshot::channel();
-        self.events_rx.receiver = Some(resp_rx);
+        self.db_events_rx.receiver = Some(resp_rx);
         DB_CMD_TX
             .get()
             .unwrap()
@@ -276,6 +328,20 @@ impl PedometerApp {
             })
             .unwrap();
         self.request_repaint = true;
+    }
+
+    fn recv_events(&mut self) {
+        while let Ok(event) = self.gui_events_rx.try_recv() {
+            info!("Received gui event: {:?}", event);
+            match event {
+                PedometerGuiEvent::Soc(soc) => self.soc = Some(soc),
+                PedometerGuiEvent::Connected => self.connected = true,
+                PedometerGuiEvent::Disconnected => {
+                    self.soc = None;
+                    self.connected = false;
+                }
+            }
+        }
     }
 }
 
@@ -313,14 +379,25 @@ impl<T> Default for MessageReceiver<T> {
 }
 
 impl<T> MessageReceiver<T> {
-    fn try_recv(&mut self) -> bool {
+    fn try_recv<F: Fn(T) -> T>(&mut self, data_modifier: Option<F>) -> bool {
         if let Some(receiver) = &mut self.receiver {
             if let Ok(data) = receiver.try_recv() {
-                self.current = Some(data);
+                if let Some(data_modifier) = data_modifier {
+                    self.current = Some(data_modifier(data));
+                } else {
+                    self.current = Some(data);
+                }
                 self.receiver = None;
                 return true;
             }
         }
         false
     }
+}
+
+#[derive(Debug)]
+pub(crate) enum PedometerGuiEvent {
+    Soc(u8),
+    Connected,
+    Disconnected,
 }

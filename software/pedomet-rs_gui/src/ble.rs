@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::gui::GUI_EVENT_TX;
 use crate::persistence::{PedometerDatabaseCommand, PedometerPersistenceEvent, DB_CMD_TX};
 
 /// Only devices whose name contains this string will be tried.
@@ -30,11 +31,14 @@ const CHARACTERISTIC_UUID_RESPONSE_EVENTS: Uuid =
 const CHARACTERISTIC_UUID_DELETE_EVENTS: Uuid =
     Uuid::from_u128(0x1C2A0003_ABF2_4B98_BA1C_25D5EA728525);
 const CHARACTERISTIC_UUID_EPOCH_MS: Uuid = Uuid::from_u128(0x1C2A0004_ABF2_4B98_BA1C_25D5EA728525);
+const CHARACTERISTIC_BOOT_ID: Uuid = Uuid::from_u128(0x1C2A0005_ABF2_4B98_BA1C_25D5EA728525);
+const CHARACTERISTIC_MAX_EVENT_ID: Uuid = Uuid::from_u128(0x1C2A0006_ABF2_4B98_BA1C_25D5EA728525);
 
-const SUB_CHARACTERISTICS: [Uuid; 3] = [
+const SUB_CHARACTERISTICS: [Uuid; 4] = [
     CHARACTERISTIC_UUID_SOC,
     CHARACTERISTIC_UUID_EPOCH_MS,
     CHARACTERISTIC_UUID_RESPONSE_EVENTS,
+    CHARACTERISTIC_MAX_EVENT_ID,
 ];
 
 pub static BLE_CMD_TX: OnceLock<mpsc::Sender<PedometerDeviceHandlerCommand>> = OnceLock::new();
@@ -57,7 +61,11 @@ impl PedometerDeviceHandler {
             while let Some(cmd) = event_receiver.recv().await {
                 match cmd {
                     PedometerDeviceHandlerCommand::TryConnect { responder } => {
-                        let _ = responder.send(self.try_connect().await);
+                        let res = self.try_connect().await;
+                        if let Err(e) = &res {
+                            warn!("Could not connect to device: {e}");
+                        }
+                        let _ = responder.send(res);
                     }
                     PedometerDeviceHandlerCommand::IsConnected { responder } => {
                         let _ = responder.send(self.is_connected().await);
@@ -103,9 +111,16 @@ impl PedometerDeviceHandler {
                 })
                 .await?;
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
-
-            if let Ok(Some(device)) = find_device(&adapter).await {
+            if let Ok(Ok(Some(device))) = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match find_device(&adapter).await {
+                        Ok(None) => tokio::time::sleep(Duration::from_millis(200)).await,
+                        res => return res,
+                    }
+                }
+            })
+            .await
+            {
                 info!("Found device: {:?}", device);
                 self.device = Some(device);
             } else {
@@ -117,17 +132,42 @@ impl PedometerDeviceHandler {
             device.connect().await?;
             device.discover_services().await?;
 
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             for uuid in SUB_CHARACTERISTICS {
-                if let Some(soc_char) = find_characteristic(device, uuid) {
-                    info!("Found characteristic: {:?}", soc_char);
-                    device.subscribe(&soc_char).await?;
+                if let Some(char) = find_characteristic(device, uuid) {
+                    info!("Found characteristic: {:?}", char);
+                    device.subscribe(&char).await?;
                 } else {
                     warn!("Could not find characteristic: {}", uuid);
                 }
             }
             self.send_host_epoch().await?;
+            let boot_id = u32::from_le_bytes(
+                device
+                    .read(&find_characteristic(device, CHARACTERISTIC_BOOT_ID).unwrap())
+                    .await?[..]
+                    .try_into()?,
+            );
+            let max_event_id = u32::from_le_bytes(
+                device
+                    .read(&find_characteristic(device, CHARACTERISTIC_MAX_EVENT_ID).unwrap())
+                    .await?[..]
+                    .try_into()?,
+            );
+            let soc = device
+                .read(&find_characteristic(device, CHARACTERISTIC_UUID_SOC).unwrap())
+                .await?[0];
+            info!("Connected: boot_id: {boot_id}, max_event_id: {max_event_id}, soc: {soc}");
+
+            if let Err(e) = GUI_EVENT_TX
+                .get()
+                .unwrap()
+                .send(crate::gui::PedometerGuiEvent::Soc(soc))
+                .await
+            {
+                error!("Could not send gui soc event: {e}");
+            }
 
             let mut notification_stream = device.notifications().await?;
             tokio::spawn(async move {
@@ -151,13 +191,50 @@ impl PedometerDeviceHandler {
                             info!("Received epoch characteristic: {:?}", notification.value);
                         }
                         CHARACTERISTIC_UUID_SOC => {
-                            // Todo!
                             info!("Received soc characteristic: {:?}", notification.value);
+                            if let Err(e) = GUI_EVENT_TX
+                                .get()
+                                .unwrap()
+                                .send(crate::gui::PedometerGuiEvent::Soc(notification.value[0]))
+                                .await
+                            {
+                                error!("Could not send gui soc event: {e}");
+                            }
+                        }
+                        CHARACTERISTIC_MAX_EVENT_ID => {
+                            // Todo!
+                            info!(
+                                "Received max_event_id characteristic: {:?}",
+                                notification.value
+                            );
                         }
                         char => warn!("Received unknown characteristic: {char}"),
                     }
                 }
             });
+            let device = device.clone();
+            tokio::spawn(async move {
+                while let Ok(true) = device.is_connected().await {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                if let Err(e) = GUI_EVENT_TX
+                    .get()
+                    .unwrap()
+                    .send(crate::gui::PedometerGuiEvent::Disconnected)
+                    .await
+                {
+                    error!("Could not send gui disconnected event: {e}");
+                }
+            });
+        }
+        info!("Send connected event");
+        if let Err(e) = GUI_EVENT_TX
+            .get()
+            .unwrap()
+            .send(crate::gui::PedometerGuiEvent::Connected)
+            .await
+        {
+            error!("Could not send gui connected event: {e}");
         }
         Ok(())
     }
@@ -215,12 +292,15 @@ impl PedometerDeviceHandler {
                             Ok(persistence_event) => {
                                 let (responder_tx, responder_rx) = oneshot::channel();
                                 info!("Send event to db: {persistence_event:?}");
-                                if let Err(e) = DB_CMD_TX.get().unwrap().try_send(
-                                    PedometerDatabaseCommand::AddEvent {
+                                if let Err(e) = DB_CMD_TX
+                                    .get()
+                                    .unwrap()
+                                    .send(PedometerDatabaseCommand::AddEvent {
                                         event: persistence_event,
                                         responder: responder_tx,
-                                    },
-                                ) {
+                                    })
+                                    .await
+                                {
                                     warn!("Could not send event to database! ({e})");
                                     events_retain.push(true);
                                 } else if let Err(e) = responder_rx.await {
