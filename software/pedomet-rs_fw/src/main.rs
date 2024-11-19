@@ -314,6 +314,8 @@ async fn main(spawner: Spawner) {
 
     info!("Enable battery monitoring");
     let _read_bat_en = Output::new(peripherals.P0_14, Level::Low, OutputDrive::Standard);
+    info!("Set high charge current (100mA)");
+    let _bat_high_charge = Output::new(peripherals.P0_13, Level::Low, OutputDrive::Standard);
 
     info!("Init IMU");
     let mut imu_pwr = Output::new(peripherals.P1_08, Level::Low, OutputDrive::HighDrive);
