@@ -2,7 +2,7 @@ use std::{sync::OnceLock, time::Duration};
 
 use anyhow::anyhow;
 use app_dirs2::{app_root, AppDataType};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use log::{info, warn};
 use pedomet_rs_common::{PedometerEvent, PedometerEventType};
 use sqlx::{prelude::FromRow, SqlitePool};
@@ -43,6 +43,10 @@ impl PedometerPersistenceEvent {
     pub fn get_date_time(&self) -> anyhow::Result<DateTime<Utc>> {
         DateTime::from_timestamp_millis(self.timestamp_ms).ok_or_else(|| anyhow!("Invalid epoch"))
     }
+
+    pub fn get_date_time_local(&self) -> anyhow::Result<DateTime<Local>> {
+        Ok(DateTime::from(self.get_date_time()?))
+    }
 }
 
 pub(crate) struct PedometerDatabase {
@@ -81,6 +85,11 @@ impl PedometerDatabase {
                             .send(self.get_events_in_time_range(start, end).await)
                             .is_err()
                         {
+                            warn!("Could not send response");
+                        }
+                    }
+                    PedometerDatabaseCommand::GetLastEvent { responder } => {
+                        if responder.send(self.get_last_row().await).is_err() {
                             warn!("Could not send response");
                         }
                     }
@@ -128,18 +137,18 @@ impl PedometerDatabase {
         .await?)
     }
 
-    async fn get_max_event_id(&self) -> anyhow::Result<u32> {
-        Ok(sqlx::query!(
+    async fn get_last_row(&self) -> anyhow::Result<Option<PedometerPersistenceEvent>> {
+        Ok(sqlx::query_as!(
+            PedometerPersistenceEvent,
             "
-        SELECT max(event_id) as max_event_id
+        SELECT event_id, timestamp_ms, boot_id, steps
         FROM events
+        ORDER BY rowid desc
+        LIMIT 1
         "
         )
-        .fetch_one(&self.pool)
-        .await?
-        .max_event_id
-        .ok_or_else(|| anyhow!("No events in database"))?
-        .try_into()?)
+        .fetch_optional(&self.pool)
+        .await?)
     }
 }
 
@@ -152,6 +161,9 @@ pub(crate) enum PedometerDatabaseCommand {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
         responder: oneshot::Sender<anyhow::Result<Vec<PedometerPersistenceEvent>>>,
+    },
+    GetLastEvent {
+        responder: oneshot::Sender<anyhow::Result<Option<PedometerPersistenceEvent>>>,
     },
     Exit,
 }

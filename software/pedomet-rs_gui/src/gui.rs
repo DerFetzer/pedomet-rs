@@ -1,4 +1,4 @@
-use chrono::{Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use egui::{Align2, Button, Direction, Frame, Margin, ScrollArea, Slider, TopBottomPanel, Vec2};
 use egui_extras::DatePickerButton;
 use egui_plot::{uniform_grid_spacer, Bar, BarChart, HLine, Legend, Plot};
@@ -137,16 +137,24 @@ fn transform_events_to_relative_steps(
         return events;
     }
     let first_steps = events.first().unwrap().steps;
+    let first_boot_id = events.first().unwrap().boot_id;
+    debug!("Db events: {events:?}");
     events = events
         .into_iter()
-        .scan(first_steps, |last_steps, mut event| {
-            let event_steps = event.steps as u16;
-            event.steps = (event_steps).overflowing_sub(*last_steps as u16).0 as i64;
-            *last_steps = event_steps as i64;
-            Some(event)
-        })
+        .scan(
+            (first_steps, first_boot_id),
+            |(last_steps, last_boot_id), mut event| {
+                let event_steps = event.steps as u16;
+                if *last_boot_id == event.boot_id {
+                    event.steps = (event_steps).overflowing_sub(*last_steps as u16).0 as i64;
+                }
+                *last_steps = event_steps as i64;
+                *last_boot_id = event.boot_id;
+                Some(event)
+            },
+        )
         .collect();
-    info!("Mapped events: {events:?}");
+    debug!("Mapped events: {events:?}");
     events
 }
 
@@ -219,7 +227,7 @@ impl PedometerApp {
                         .get()
                         .unwrap()
                         .blocking_send(PedometerDeviceHandlerCommand::RequestEvents {
-                            min_event_id: Some(self.event_id),
+                            min_event_id: None,
                             responder: resp_tx,
                         })
                         .unwrap();
@@ -265,10 +273,10 @@ impl PedometerApp {
                 .map(|h| Bar::new(h as f64, 0.0).width(1.0))
                 .collect();
             for event in events.iter().filter(|e| {
-                let event_dt = e.get_date_time().unwrap();
+                let event_dt = e.get_date_time_local().unwrap();
                 self.state.selected_date == event_dt.naive_local().into()
             }) {
-                let event_dt = event.get_date_time().unwrap().naive_local();
+                let event_dt = event.get_date_time_local().unwrap();
                 bars.get_mut(event_dt.hour() as usize).unwrap().value += event.steps as f64;
             }
             Plot::new("day_plot")
@@ -280,7 +288,7 @@ impl PedometerApp {
                 .clamp_grid(true)
                 .x_grid_spacer(uniform_grid_spacer(|_| [6., 3., 1.]))
                 .y_axis_min_width(40.)
-                .set_margin_fraction((0.0, 0.1).into())
+                .set_margin_fraction((0.01, 0.1).into())
                 .reset()
                 .show(ui, |plot_ui| {
                     plot_ui.bar_chart(BarChart::new(bars));
@@ -298,17 +306,20 @@ impl PedometerApp {
                 })
                 .collect();
             for event in events.iter().filter(|e| {
-                let event_dt = e.get_date_time().unwrap();
+                let event_dt = e.get_date_time_local().unwrap();
                 let local = event_dt.naive_local();
 
                 let selected_dt: NaiveDateTime = self.state.selected_date.into();
 
                 local > selected_dt - Duration::days(6) && local <= selected_dt + Duration::days(1)
             }) {
-                let event_dt = event.get_date_time().unwrap().naive_local();
-                bars.get_mut((self.state.selected_date - event_dt.date()).num_days() as usize)
-                    .unwrap()
-                    .value += event.steps as f64;
+                let event_dt = event.get_date_time_local().unwrap();
+                let naive_event_dt = event_dt.naive_local();
+                bars.get_mut(
+                    (self.state.selected_date - naive_event_dt.date()).num_days() as usize,
+                )
+                .unwrap()
+                .value += event.steps as f64;
             }
             Plot::new("week_plot")
                 .height(200.0)
@@ -324,7 +335,7 @@ impl PedometerApp {
                 .x_grid_spacer(uniform_grid_spacer(|_| [2., 2., 1.]))
                 .y_axis_min_width(40.)
                 .clamp_grid(true)
-                .set_margin_fraction((0.0, 0.1).into())
+                .set_margin_fraction((0.01, 0.1).into())
                 .legend(Legend::default())
                 .reset()
                 .show(ui, |plot_ui| {

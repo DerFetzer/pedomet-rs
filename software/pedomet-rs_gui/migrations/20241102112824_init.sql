@@ -7,4 +7,4 @@ create table events(
 
 create index idx_timestamp_ms on events(timestamp_ms);
 create index idx_event_id on events(event_id);
-create unique index idx_unique on events(timestamp_ms, steps);
+create unique index idx_unique on events(event_id, boot_id);
