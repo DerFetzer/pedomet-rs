@@ -74,8 +74,7 @@ impl PedometerDeviceHandler {
                         min_event_id,
                         responder,
                     } => {
-                        let _ =
-                            responder.send(self.request_events(min_event_id.unwrap_or(0)).await);
+                        let _ = responder.send(self.request_events(min_event_id).await);
                     }
                     PedometerDeviceHandlerCommand::DeleteEvents {
                         max_event_id,
@@ -326,8 +325,17 @@ impl PedometerDeviceHandler {
         }
         info!("Max event id: {max_event_id}");
         if received_events {
-            info!("Try to read more events");
+            info!("Notify gui about new events");
+            if let Err(e) = GUI_EVENT_TX
+                .get()
+                .unwrap()
+                .send(crate::gui::PedometerGuiEvent::NewEvents)
+                .await
+            {
+                error!("Could not send gui new_events event: {e}");
+            }
 
+            info!("Try to read more events");
             let (resp_tx, _resp_rx) = oneshot::channel();
             let _ = BLE_CMD_TX
                 .get()
@@ -338,18 +346,9 @@ impl PedometerDeviceHandler {
                 })
                 .await;
         }
-        info!("Retain events: {event_queue:?} {events_retain:?}");
+        debug!("Retain events: {event_queue:?} {events_retain:?}");
         let mut retain_iter = events_retain.iter();
         event_queue.retain(|_| *retain_iter.next().unwrap());
-
-        if let Err(e) = GUI_EVENT_TX
-            .get()
-            .unwrap()
-            .send(crate::gui::PedometerGuiEvent::NewEvents)
-            .await
-        {
-            error!("Could not send gui new_events event: {e}");
-        }
     }
 
     async fn is_connected(&self) -> anyhow::Result<bool> {
@@ -359,9 +358,61 @@ impl PedometerDeviceHandler {
         })
     }
 
-    async fn request_events(&self, min_event_id: u32) -> anyhow::Result<()> {
+    async fn request_events(&self, min_event_id: Option<u32>) -> anyhow::Result<()> {
         match &self.device {
             Some(device) if device.is_connected().await? => {
+                let min_event_id = match min_event_id {
+                    Some(min_event_id) => min_event_id,
+                    None => {
+                        let (responder_tx, responder_rx) = oneshot::channel();
+                        info!("Get last event from db");
+                        DB_CMD_TX
+                            .get()
+                            .unwrap()
+                            .send(PedometerDatabaseCommand::GetLastEvent {
+                                responder: responder_tx,
+                            })
+                            .await?;
+                        if let Some(last_db_event) = responder_rx.await?? {
+                            let current_boot_id = u32::from_le_bytes(
+                                device
+                                    .read(
+                                        &find_characteristic(device, CHARACTERISTIC_BOOT_ID)
+                                            .ok_or_else(|| {
+                                                anyhow!("Could not find boot_id characteristic")
+                                            })?,
+                                    )
+                                    .await?[..]
+                                    .try_into()?,
+                            );
+                            let current_max_event_id = u32::from_le_bytes(
+                                device
+                                    .read(
+                                        &find_characteristic(device, CHARACTERISTIC_MAX_EVENT_ID)
+                                            .ok_or_else(|| {
+                                            anyhow!("Could not find boot_id characteristic")
+                                        })?,
+                                    )
+                                    .await?[..]
+                                    .try_into()?,
+                            );
+                            info!(
+                            "last_db_event: {:?}, current_boot_id: {}, current_max_event_id: {}",
+                            last_db_event, current_boot_id, current_max_event_id
+                        );
+                            if current_max_event_id as i64 >= last_db_event.event_id
+                                && current_boot_id as i64 >= last_db_event.boot_id
+                            {
+                                (last_db_event.event_id + 1).try_into()?
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        }
+                    }
+                };
+                info!("Request events from id {}", min_event_id);
                 device
                     .write(
                         &find_characteristic(device, CHARACTERISTIC_UUID_REQUEST_EVENTS)
