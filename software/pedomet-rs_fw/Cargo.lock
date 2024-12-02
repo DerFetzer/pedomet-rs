@@ -873,12 +873,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "panic-halt"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
-
-[[package]]
 name = "panic-probe"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -886,6 +880,15 @@ checksum = "4047d9235d1423d66cc97da7d07eddb54d4f154d6c13805c6d0793956f4f25b0"
 dependencies = [
  "cortex-m",
  "defmt",
+]
+
+[[package]]
+name = "panic-reset"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cf1ff2a5b1a478dd94572aa43476b6630e72071cbd016985003ad3903a3a4f5"
+dependencies = [
+ "cortex-m",
 ]
 
 [[package]]
@@ -916,8 +919,8 @@ dependencies = [
  "heapless 0.7.17",
  "nrf-softdevice",
  "nrf-softdevice-s140",
- "panic-halt",
  "panic-probe",
+ "panic-reset",
  "pedomet-rs_common",
  "postcard",
  "sequential-storage",

@@ -38,6 +38,9 @@ android_logger = "0.14.1"
 [profile.dev.package.sqlx-macros]
 opt-level = 3
 
+[profile.release]
+lto = "thin"
+
 [features]
 default = []
 desktop = []

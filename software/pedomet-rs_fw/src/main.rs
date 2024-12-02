@@ -7,13 +7,13 @@ mod imu;
 mod storage_event_queue;
 
 #[cfg(not(feature = "defmt"))]
-use panic_halt as _;
+use panic_reset as _;
 
 #[cfg(feature = "defmt")]
 use {defmt_rtt as _, panic_probe as _};
 
+use crate::fmt::{info, unwrap, warn};
 use core::mem;
-use defmt::{info, unwrap, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_nrf::{

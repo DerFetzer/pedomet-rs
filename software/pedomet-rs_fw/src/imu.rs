@@ -1,4 +1,4 @@
-use defmt::{debug, info};
+use crate::fmt::debug;
 use embassy_time::{Duration, Instant};
 use embedded_hal_async::i2c::Error;
 

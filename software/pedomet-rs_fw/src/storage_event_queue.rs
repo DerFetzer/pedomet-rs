@@ -1,6 +1,6 @@
 use core::{cmp::max, ops::Range};
 
-use defmt::{debug, info};
+use crate::fmt::{debug, info};
 use embassy_time::Instant;
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use pedomet_rs_common::{PedometerEvent, PedometerEventType};
