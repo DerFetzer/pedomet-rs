@@ -152,6 +152,7 @@ impl PedometerDatabase {
     }
 }
 
+#[allow(unused)]
 pub(crate) enum PedometerDatabaseCommand {
     AddEvent {
         event: PedometerPersistenceEvent,
@@ -168,7 +169,5 @@ pub(crate) enum PedometerDatabaseCommand {
     Exit,
 }
 
-pub(crate) type PedometerDatabaseCommandSender = mpsc::Sender<PedometerDatabaseCommand>;
-pub(crate) type PedometerDatabaseAddEventResult = ();
 pub(crate) type PedometerDatabaseGetEventsInTimeRangeReceiver =
     anyhow::Result<Vec<PedometerPersistenceEvent>>;

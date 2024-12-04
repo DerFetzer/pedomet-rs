@@ -1,4 +1,3 @@
-use log::{debug, info};
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -8,10 +7,12 @@ use crate::android::{setup_class_loader, JAVAVM};
 #[cfg(target_os = "android")]
 use jni::AttachGuard;
 #[cfg(target_os = "android")]
+use log::{debug, info};
+#[cfg(target_os = "android")]
 use std::cell::RefCell;
 #[cfg(target_os = "android")]
 std::thread_local! {
-    static JNI_ENV: RefCell<Option<AttachGuard<'static>>> = RefCell::new(None);
+    static JNI_ENV: RefCell<Option<AttachGuard<'static>>> = const { RefCell::new(None) };
 }
 
 #[cfg(not(target_os = "android"))]
@@ -61,7 +62,12 @@ pub(crate) fn create_runtime_and_block<F: Future>(future: F) -> F::Output {
             let env = vm.attach_current_thread().unwrap();
 
             let thread = env
-                .call_static_method("java/lang/Thread", "currentThread", "()Ljava/lang/Thread;", &[])
+                .call_static_method(
+                    "java/lang/Thread",
+                    "currentThread",
+                    "()Ljava/lang/Thread;",
+                    &[],
+                )
                 .unwrap()
                 .l()
                 .unwrap();

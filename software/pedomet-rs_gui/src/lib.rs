@@ -12,10 +12,9 @@ use app_dirs2::AppInfo;
 use ble::{PedometerDeviceHandler, PedometerDeviceHandlerCommand, BLE_CMD_TX};
 use eframe::{NativeOptions, Renderer};
 use gui::{PedometerApp, GUI_EVENT_TX};
-use log::{debug, error, info};
+use log::{debug, info};
 use persistence::{PedometerDatabase, PedometerDatabaseCommand, DB_CMD_TX};
-use std::path::Path;
-use tokio::sync::{mpsc, watch::Sender};
+use tokio::sync::mpsc;
 #[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
 
@@ -73,9 +72,7 @@ fn _main(mut options: NativeOptions) -> eframe::Result<()> {
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    use std::path::PathBuf;
-
-    use app_dirs2::{get_app_root, AppDataType};
+    use app_dirs2::AppDataType;
     use winit::platform::android::EventLoopBuilderExtAndroid;
 
     android_logger::init_once(

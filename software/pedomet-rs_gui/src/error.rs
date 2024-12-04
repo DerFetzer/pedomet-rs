@@ -6,5 +6,3 @@ pub(crate) enum PedometerGuiError {
     #[error("Invalid event type for persistence: {:?}", .0)]
     InvalidEventType(PedometerEventType),
 }
-
-pub(crate) type PedometerGuiResult<T> = Result<T, PedometerGuiError>;
