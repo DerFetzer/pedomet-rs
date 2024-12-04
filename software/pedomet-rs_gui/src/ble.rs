@@ -53,6 +53,7 @@ impl PedometerDeviceHandler {
         Ok(Self { device: None })
     }
 
+    #[allow(unused_variables)]
     pub(crate) async fn spawn_message_handler(
         mut self,
         mut event_receiver: mpsc::Receiver<PedometerDeviceHandlerCommand>,
@@ -76,10 +77,7 @@ impl PedometerDeviceHandler {
                     } => {
                         let _ = responder.send(self.request_events(min_event_id).await);
                     }
-                    PedometerDeviceHandlerCommand::DeleteEvents {
-                        max_event_id,
-                        responder,
-                    } => {
+                    PedometerDeviceHandlerCommand::DeleteEvents { .. } => {
                         todo!()
                     }
                     PedometerDeviceHandlerCommand::Disconnect { responder } => {
@@ -173,10 +171,10 @@ impl PedometerDeviceHandler {
 
             let mut notification_stream = device.notifications().await?;
             tokio::spawn(async move {
+                let mut event_queue = VecDeque::new();
+                let mut device_time_offsets = HashMap::new();
+                let mut max_time_offset_boot_id = 0;
                 while let Some(notification) = notification_stream.next().await {
-                    let mut event_queue = VecDeque::new();
-                    let mut device_time_offsets = HashMap::new();
-                    let mut max_time_offset_boot_id = 0;
                     match notification.uuid {
                         CHARACTERISTIC_UUID_RESPONSE_EVENTS => {
                             info!("Received event response");
@@ -446,6 +444,7 @@ impl PedometerDeviceHandler {
     }
 }
 
+#[allow(unused)]
 pub(crate) enum PedometerDeviceHandlerCommand {
     TryConnect {
         responder: oneshot::Sender<anyhow::Result<()>>,
