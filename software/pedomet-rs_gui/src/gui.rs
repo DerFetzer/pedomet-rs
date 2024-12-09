@@ -65,7 +65,7 @@ impl eframe::App for PedometerApp {
             .anchor(Align2::LEFT_TOP, (10.0, 10.0))
             .direction(Direction::TopDown);
 
-        ctx.set_zoom_factor(1.4);
+        ctx.set_zoom_factor(1.0);
         ctx.style_mut(|style| {
             style.spacing.slider_width = 140.0;
             style.spacing.button_padding = Vec2::new(12.0, 4.0);
@@ -272,13 +272,16 @@ impl PedometerApp {
             let mut bars: Vec<_> = (0..24)
                 .map(|h| Bar::new(h as f64, 0.0).width(1.0))
                 .collect();
+            let mut steps_day = 0;
             for event in events.iter().filter(|e| {
                 let event_dt = e.get_date_time_local().unwrap();
                 self.state.selected_date == event_dt.naive_local().into()
             }) {
                 let event_dt = event.get_date_time_local().unwrap();
                 bars.get_mut(event_dt.hour() as usize).unwrap().value += event.steps as f64;
+                steps_day += event.steps;
             }
+            ui.label(format!("Schritte gesamt: {steps_day}"));
             Plot::new("day_plot")
                 .height(200.0)
                 .include_y(0)
@@ -305,6 +308,7 @@ impl PedometerApp {
                         .width(1.0)
                 })
                 .collect();
+            let mut steps_week = 0;
             for event in events.iter().filter(|e| {
                 let event_dt = e.get_date_time_local().unwrap();
                 let local = event_dt.naive_local();
@@ -320,7 +324,9 @@ impl PedometerApp {
                 )
                 .unwrap()
                 .value += event.steps as f64;
+                steps_week += event.steps;
             }
+            ui.label(format!("Schritte gesamt: {steps_week}"));
             Plot::new("week_plot")
                 .height(200.0)
                 .include_y(0)
