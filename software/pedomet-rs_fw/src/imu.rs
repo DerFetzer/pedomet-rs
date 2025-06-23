@@ -40,11 +40,11 @@ impl Timestamp {
     }
 
     fn from_time_registers(buf: [u8; 3]) -> Self {
-        Self(u16::from_le_bytes(buf[..2].try_into().unwrap()) as u32 | (buf[2] as u32) << 16)
+        Self(u16::from_le_bytes(buf[..2].try_into().unwrap()) as u32 | ((buf[2] as u32) << 16))
     }
 
     fn from_fifo(buf: [u8; 6]) -> Self {
-        Self((u16::from_le_bytes(buf[0..2].try_into().unwrap()) as u32) << 8 | buf[3] as u32)
+        Self(((u16::from_le_bytes(buf[0..2].try_into().unwrap()) as u32) << 8) | buf[3] as u32)
     }
 
     pub fn as_duration(self) -> Duration {

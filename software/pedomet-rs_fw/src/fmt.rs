@@ -103,7 +103,7 @@ macro_rules! panic {
 }
 
 macro_rules! trace {
-    ($s:literal $(, $x:expr)* $(,)?) => {
+    ($s:literal $(, $x:expr_2021)* $(,)?) => {
         {
             #[cfg(feature = "defmt")]
             ::defmt::trace!($s $(, $x)*);
@@ -114,7 +114,7 @@ macro_rules! trace {
 }
 
 macro_rules! debug {
-    ($s:literal $(, $x:expr)* $(,)?) => {
+    ($s:literal $(, $x:expr_2021)* $(,)?) => {
         {
             #[cfg(feature = "defmt")]
             ::defmt::debug!($s $(, $x)*);
@@ -125,7 +125,7 @@ macro_rules! debug {
 }
 
 macro_rules! info {
-    ($s:literal $(, $x:expr)* $(,)?) => {
+    ($s:literal $(, $x:expr_2021)* $(,)?) => {
         {
             #[cfg(feature = "defmt")]
             ::defmt::info!($s $(, $x)*);
@@ -136,7 +136,7 @@ macro_rules! info {
 }
 
 macro_rules! _warn {
-    ($s:literal $(, $x:expr)* $(,)?) => {
+    ($s:literal $(, $x:expr_2021)* $(,)?) => {
         {
             #[cfg(feature = "defmt")]
             ::defmt::warn!($s $(, $x)*);
@@ -147,7 +147,7 @@ macro_rules! _warn {
 }
 
 macro_rules! error {
-    ($s:literal $(, $x:expr)* $(,)?) => {
+    ($s:literal $(, $x:expr_2021)* $(,)?) => {
         {
             #[cfg(feature = "defmt")]
             ::defmt::error!($s $(, $x)*);
@@ -216,7 +216,7 @@ impl<T, E> Try for Result<T, E> {
 pub(crate) struct Bytes<'a>(pub &'a [u8]);
 
 #[cfg(feature = "defmt")]
-impl<'a> defmt::Format for Bytes<'a> {
+impl defmt::Format for Bytes<'_> {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(fmt, "{:02x}", self.0)
     }

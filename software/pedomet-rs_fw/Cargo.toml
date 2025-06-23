@@ -1,7 +1,7 @@
 # This file was automatically generated.
 
 [package]
-edition = "2021"
+edition = "2024"
 name = "pedomet-rs_fw"
 version = "0.1.0"
 

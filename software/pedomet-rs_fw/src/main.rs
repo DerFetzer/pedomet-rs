@@ -122,7 +122,7 @@ async fn flash_task(
                 let mut offset = 0;
                 let mut num_events = 0;
 
-                if let Err(e) = event_queue
+                match event_queue
                     .for_each(|event| {
                         let br = if event.index >= min_event_index {
                             match event
@@ -153,12 +153,12 @@ async fn flash_task(
                         })
                     })
                     .await
-                {
+                { Err(e) => {
                     warn!("Could not push event! {:?}", e);
-                } else {
+                } _ => {
                     info!("Send {} events to notification task", num_events);
                     event_sender.send(buf).await;
-                }
+                }}
             }
             FlashCommand::DeleteEvents(min_event_index) => {
                 if let Err(e) = event_queue
@@ -466,8 +466,7 @@ async fn main(spawner: Spawner) {
                         warn!("Could not send command.");
                     } else if let Err(e) = server
                         .pedometer
-                        .epoch_ms_notify(&conn, &Instant::now().as_millis())
-                    {
+                        .epoch_ms_notify(&conn, &Instant::now().as_millis()) {
                         info!("send notification error: {:?}", e);
                     }
                 }
