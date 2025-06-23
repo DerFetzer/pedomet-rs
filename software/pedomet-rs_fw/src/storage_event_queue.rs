@@ -6,7 +6,7 @@ use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use pedomet_rs_common::{PedometerEvent, PedometerEventType};
 use sequential_storage::{cache::PagePointerCache, queue};
 
-use crate::{error::PedometerResult, BOOT_ID_WATCH, MAX_EVENT_ID_WATCH};
+use crate::{BOOT_ID_WATCH, MAX_EVENT_ID_WATCH, error::PedometerResult};
 
 const FLASH_SIZE: u32 = 1024 * 1024;
 const PAGE_SIZE: u32 = 4096;
@@ -42,8 +42,10 @@ pub(crate) struct StorageEventQueue<S: embedded_storage_async::nor_flash::NorFla
 
 impl<S: MultiwriteNorFlash> StorageEventQueue<S> {
     pub async fn new(flash: S, clear: bool) -> PedometerResult<Self> {
-        debug!("FLASH_SIZE: {}, PAGE_SIZE: {}, QUEUE_FLASH_SIZE: {}, QUEUE_FLASH_RANGE: {}, QUEUE_FLASH_PAGE_COUNT: {}",
-            FLASH_SIZE, PAGE_SIZE, QUEUE_FLASH_SIZE, QUEUE_FLASH_RANGE, QUEUE_FLASH_PAGE_COUNT);
+        debug!(
+            "FLASH_SIZE: {}, PAGE_SIZE: {}, QUEUE_FLASH_SIZE: {}, QUEUE_FLASH_RANGE: {}, QUEUE_FLASH_PAGE_COUNT: {}",
+            FLASH_SIZE, PAGE_SIZE, QUEUE_FLASH_SIZE, QUEUE_FLASH_RANGE, QUEUE_FLASH_PAGE_COUNT
+        );
         let mut queue = Self {
             flash,
             cache: PagePointerCache::new(),

@@ -15,7 +15,7 @@ use {defmt_rtt as _, panic_probe as _};
 use crate::fmt::{info, unwrap, warn};
 use core::mem;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_nrf::{
     bind_interrupts,
     gpio::{Input, Level, Output, OutputDrive, Pull},
@@ -31,14 +31,14 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Instant, Timer};
 use imu::Imu;
-use nrf_softdevice::ble::{gatt_server, peripheral, Connection};
+use nrf_softdevice::ble::{Connection, gatt_server, peripheral};
 use nrf_softdevice::{
+    Flash,
     ble::advertisement_builder::{
         Flag, LegacyAdvertisementBuilder, LegacyAdvertisementPayload, ServiceList, ServiceUuid16,
     },
-    Flash,
 };
-use nrf_softdevice::{raw, Softdevice};
+use nrf_softdevice::{Softdevice, raw};
 use pedomet_rs_common::PedometerEventType;
 use static_cell::StaticCell;
 use storage_event_queue::{BreakIteration, HandleEntry, PopEntry, StorageEventQueue};
@@ -153,12 +153,15 @@ async fn flash_task(
                         })
                     })
                     .await
-                { Err(e) => {
-                    warn!("Could not push event! {:?}", e);
-                } _ => {
-                    info!("Send {} events to notification task", num_events);
-                    event_sender.send(buf).await;
-                }}
+                {
+                    Err(e) => {
+                        warn!("Could not push event! {:?}", e);
+                    }
+                    _ => {
+                        info!("Send {} events to notification task", num_events);
+                        event_sender.send(buf).await;
+                    }
+                }
             }
             FlashCommand::DeleteEvents(min_event_index) => {
                 if let Err(e) = event_queue
@@ -466,7 +469,8 @@ async fn main(spawner: Spawner) {
                         warn!("Could not send command.");
                     } else if let Err(e) = server
                         .pedometer
-                        .epoch_ms_notify(&conn, &Instant::now().as_millis()) {
+                        .epoch_ms_notify(&conn, &Instant::now().as_millis())
+                    {
                         info!("send notification error: {:?}", e);
                     }
                 }
@@ -482,12 +486,16 @@ async fn main(spawner: Spawner) {
         if let Some(soc) = BAT_SOC_WATCH.try_get() {
             unwrap!(server.bas.battery_level_set(&soc));
         }
-        unwrap!(server
-            .pedometer
-            .boot_id_set(&unwrap!(BOOT_ID_WATCH.try_get())));
-        unwrap!(server
-            .pedometer
-            .max_event_id_set(&unwrap!(MAX_EVENT_ID_WATCH.try_get())));
+        unwrap!(
+            server
+                .pedometer
+                .boot_id_set(&unwrap!(BOOT_ID_WATCH.try_get()))
+        );
+        unwrap!(
+            server
+                .pedometer
+                .max_event_id_set(&unwrap!(MAX_EVENT_ID_WATCH.try_get()))
+        );
 
         let notify_response_fut =
             notify_response_events(&server, &conn, read_event_channel.receiver());
